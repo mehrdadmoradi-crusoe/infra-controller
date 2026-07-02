@@ -114,7 +114,10 @@ network-observation loops against the API):
 VPC create is a tenant-facing gRPC (`forge.Forge`); peering is operator CLI.
 
 ```bash
-# API access from the mac: port-forward + certs from the pod
+# API access from the mac: port-forward + certs from the pod.
+# The port-forward dies whenever its shell closes or the nico-api pod
+# restarts ("Failed to dial ... EOF" = it's gone; just re-run it).
+pkill -f "port-forward -n nico-system" 2>/dev/null
 kubectl port-forward -n nico-system deploy/nico-api 1079:1079 &
 mkdir -p /tmp/nico-certs
 kubectl exec -n nico-system deploy/nico-api -- \
