@@ -103,16 +103,25 @@ grpcurl -insecure --cert /tmp/nico-certs/tls.crt --key /tmp/nico-certs/tls.key \
   localhost:1079 forge.Forge.CreateVpc
 ```
 
-Peer the playbook VPC with vpc-blue (IDs looked up automatically):
-
-```sh {"name":"vpc-peering-create-api"}
-./pb-peer.sh
-```
-
-Cleanup — removes the playbook VPC's peerings, then the VPC itself:
+Cleanup — removes the playbook VPC (and any peerings involving it):
 
 ```sh {"name":"vpc-delete"}
 ./pb-cleanup.sh
+```
+
+### VPC peering, end to end (the full story)
+
+One command per direction. `pb-peer.sh` creates the VpcPeering object in
+NICo, applies the VRF route leaking on both DPUs (the job forge-dpu-agent
+does on real BlueFields), then proves it: leaked route + cross-VPC ping over
+VXLAN. `pb-unpeer.sh` reverses all of it and proves isolation is back.
+
+```sh {"name":"vpc-peer-e2e"}
+./pb-peer.sh
+```
+
+```sh {"name":"vpc-unpeer-e2e"}
+./pb-unpeer.sh
 ```
 
 ## 4. EVPN fabric — control plane

@@ -31,6 +31,10 @@ Repo-local git identity: Mehrdad Moradi <imehrdad2012@gmail.com>.
 8. **FRRouting/frr** — silent blackhole when one VTEP advertises distinct
    per-VRF router-MACs (zebra last-write-wins on SVI neigh entries, no
    warning). Repro = demo/frr compose file with the shared-MAC fix reverted.
+9. **Docs correction**: `docs/manuals/vpc/vpc_peering_management.md` shows
+   `vpc-peering delete <PEERING_CONNECTION_ID>` (positional) but the CLI
+   requires `--id <ID>` — the documented command exits with a usage error.
+   Easy docs PR or use their documentation_request_correction issue form.
 
 ## Contribution requirements (NVIDIA/infra-controller)
 
