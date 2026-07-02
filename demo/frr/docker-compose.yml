@@ -1,0 +1,69 @@
+
+# EVPN symmetric IRB fabric beside the NICo kind cluster — the same
+# architecture NICo/HBN programs on real BlueFields:
+#
+#   dpu-hbn-01 AS65201 VTEP 10.180.62.1  vpc-blue instance 10.10.10.1/24 \
+#                                                                         tor-leaf-01 AS65100
+#   dpu-hbn-02 AS65202 VTEP 10.180.62.2  vpc-green instance 10.20.20.1/24/   (underlay + EVPN transit)
+#
+# Each DPU carries BOTH per-VPC VRFs with L3VNIs (vpc-blue VNI 2024549,
+# vpc-green VNI 2024536 — the VNIs NICo allocated). Tenant routes travel as
+# EVPN type-5 over VXLAN. VPCs are isolated by default;
+# ./vpc-peering-create.sh leaks routes between the VRFs on every DPU,
+# exactly what forge-dpu-agent does on VpcPeering create.
+services:
+  tor-leaf:
+    image: quay.io/frrouting/frr:10.2.1
+    container_name: tor-leaf-01
+    privileged: true
+    networks:
+      fabric:
+        ipv4_address: 172.30.0.2
+    volumes:
+      - ./tor-leaf/frr.conf:/etc/frr/frr.conf
+      - ./tor-leaf/daemons:/etc/frr/daemons
+
+  dpu-hbn:
+    image: quay.io/frrouting/frr:10.2.1
+    container_name: dpu-hbn-01
+    privileged: true
+    command: ["/init-evpn.sh"]
+    environment:
+      VTEP_IP: 10.180.62.1
+      SYSTEM_MAC_ID: "1"
+      INSTANCE_VRF: vrf-blue
+      INSTANCE_ADDR: 10.10.10.1/24
+    networks:
+      fabric:
+        ipv4_address: 172.30.0.3
+    volumes:
+      - ./dpu-hbn/frr.conf:/etc/frr/frr.conf
+      - ./dpu-hbn/daemons:/etc/frr/daemons
+      - ./dpu-hbn/init-evpn.sh:/init-evpn.sh
+
+  dpu-hbn-2:
+    image: quay.io/frrouting/frr:10.2.1
+    container_name: dpu-hbn-02
+    privileged: true
+    command: ["/init-evpn.sh"]
+    environment:
+      VTEP_IP: 10.180.62.2
+      SYSTEM_MAC_ID: "2"
+      INSTANCE_VRF: vrf-green
+      INSTANCE_ADDR: 10.20.20.1/24
+    networks:
+      fabric:
+        ipv4_address: 172.30.0.4
+    volumes:
+      - ./dpu-hbn-2/frr.conf:/etc/frr/frr.conf
+      - ./dpu-hbn/daemons:/etc/frr/daemons
+      - ./dpu-hbn/init-evpn.sh:/init-evpn.sh
+
+networks:
+  fabric:
+    name: nico-fabric
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1

@@ -20,6 +20,9 @@ nico-api:
       # limit, so let's stay safely below that.
       max_database_connections = 64
 
+      # Allow VPC peering between any virtualization types (demo)
+      vpc_peering_policy = "mixed"
+
       [pools.lo-ip]
       type = "ipv4"
       ranges = [{ start = "10.180.64.1", end = "10.180.127.254" }]
@@ -90,6 +93,7 @@ nico-api:
       [site_explorer]
       enabled = true
       create_machines = true
+      create_switches = true
       allow_changing_bmc_proxy = true
       bmc_proxy = "machine-a-tron-bmc-mock.nico-system.svc.cluster.local:1266"
       run_interval = "10s"
