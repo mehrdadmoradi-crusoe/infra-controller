@@ -16,12 +16,36 @@ services:
     image: quay.io/frrouting/frr:10.2.1
     container_name: tor-leaf-01
     privileged: true
+    command: ["/init-evpn.sh"]
+    environment:
+      VTEP_IP: 10.180.62.3
+      SYSTEM_MAC_ID: "3"
+      INTERCONNECT_IP: 172.31.0.1/24
+      INTERCONNECT_VRF: vrf-blue
     networks:
       fabric:
         ipv4_address: 172.30.0.2
+      interconnect:
+        ipv4_address: 172.31.0.1
     volumes:
       - ./tor-leaf/frr.conf:/etc/frr/frr.conf
       - ./tor-leaf/daemons:/etc/frr/daemons
+      - ./dpu-hbn/init-evpn.sh:/init-evpn.sh
+
+  gcp-router:
+    image: quay.io/frrouting/frr:10.2.1
+    container_name: gcp-router
+    privileged: true
+    command: ["/init-gcp.sh"]
+    environment:
+      GCP_SUBNET_ADDR: 10.128.0.1/20
+    networks:
+      interconnect:
+        ipv4_address: 172.31.0.2
+    volumes:
+      - ./gcp-router/frr.conf:/etc/frr/frr.conf
+      - ./gcp-router/daemons:/etc/frr/daemons
+      - ./gcp-router/init-gcp.sh:/init-gcp.sh
 
   dpu-hbn:
     image: quay.io/frrouting/frr:10.2.1
@@ -67,3 +91,12 @@ networks:
       config:
         - subnet: 172.30.0.0/24
           gateway: 172.30.0.1
+  # Simulates the dedicated interconnect port/VLAN between the Crusoe
+  # border and the peer cloud (GCP Partner Interconnect).
+  interconnect:
+    name: nico-interconnect
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+          gateway: 172.31.0.254

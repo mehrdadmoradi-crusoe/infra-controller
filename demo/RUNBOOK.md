@@ -224,6 +224,47 @@ the encap router-MAC matches the far SVI (`ip neigh show dev br-vrf-blue` vs
 the peer's bridge MAC). Distinct per-VRF SVI MACs break symmetric IRB — hence
 the shared system MAC in init-evpn.sh.
 
+## Demo 6 — Cloud VPC Interconnect (the L3-architecture version)
+
+Simulates Crusoe's VPC Interconnect product as it would look on an EVPN/L3
+fabric: the border leaf (tor-leaf-01) holds the customer VRF and peers with
+the external cloud inside it. No ovnbgp/OpenFlow glue, no per-interconnect
+VLAN plumbing — the interconnect is one more BGP session in a VRF.
+
+```
+ dpu-hbn-01 (vrf-blue: 10.10.10.1/24) ──┐
+                                        ├─ EVPN fabric ── tor-leaf-01 (border leaf,
+ dpu-hbn-02 (vrf-green: 10.20.20.1/24) ─┘                  VTEP 10.180.62.3,
+                                                            vrf-blue holds eth1)
+                                                                 │ 172.31.0.0/24
+                                                                 │ (dedicated port)
+                                                            gcp-router AS 16550
+                                                            "GCP VPC" 10.128.0.0/20
+```
+
+AS 16550 = the real GCP Partner Interconnect ASN; 10.128.0.0/20 matches the
+SSI production deployment.
+
+```bash
+cd demo/frr
+./interconnect-up.sh                # = the entire interconnect enablement
+docker exec tor-leaf-01 vtysh -c 'show bgp vrf vrf-blue summary'   # GCP session Established
+docker exec dpu-hbn-01 vtysh -c 'show ip route vrf vrf-blue'       # 10.128.0.0/20 as type-5
+docker exec dpu-hbn-01 ip vrf exec vrf-blue ping -c3 -I 10.10.10.1 10.128.0.1   # ~0.8ms
+docker exec gcp-router ping -c2 -I 10.128.0.1 10.10.10.1           # return path
+./interconnect-down.sh              # session shut -> routes withdrawn in seconds
+```
+
+Talking points vs the MVP (OVNGW/ovnbgp/OpenFlow):
+- Route exchange is plain BGP->EVPN type-5; no BGP->OpenFlow translation layer.
+- Isolation is the VRF/VNI itself; no per-interconnect VLAN on the fabric
+  (only the physical handoff keeps one).
+- With VPC peering active, vpc-green transitively reaches GCP through
+  vrf-blue's leak — real deployments would scope this with route-targets;
+  good discussion point on peering vs interconnect policy interaction.
+- MVP limitations dissolve: multi-VPC per site = more VRFs; no supernet
+  restriction (exact prefixes, no static steering routes).
+
 ## Reset / teardown
 
 ```bash
@@ -257,4 +298,8 @@ cd demo/frr && docker compose down
 - Switches explore fine but never appear in `switch show` unless
   `[site_explorer] create_switches = true` — its default is false while
   `create_machines` defaults from config. Same family: `create_power_shelves`.
+- After `docker compose up --force-recreate` of the whole FRR fleet, FRR can
+  come up with L3VNIs recognized but ZERO type-5 origination (startup race).
+  Fix: `docker restart <container>` of the affected node(s), then re-run
+  vpc-peering-create.sh (runtime `import vrf` state is lost on restart).
 ```

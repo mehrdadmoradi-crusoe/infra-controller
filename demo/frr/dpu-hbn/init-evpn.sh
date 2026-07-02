@@ -31,10 +31,24 @@ setup_l3vni vrf-blue 2024549
 setup_l3vni vrf-green 2024536
 
 # Tenant instance hosted on this DPU
-if [ -n "$INSTANCE_VRF" ]; then
+if [ -n "${INSTANCE_VRF:-}" ]; then
   ip link show inst0 >/dev/null 2>&1 || ip link add inst0 type dummy
   ip link set inst0 master "$INSTANCE_VRF" up
   ip addr replace "${INSTANCE_ADDR:?set INSTANCE_ADDR}" dev inst0
+fi
+
+# Border-leaf role: enslave the interconnect-facing interface (identified by
+# its IP) into the customer VRF — the 1:1 customer-to-VRF handoff for a
+# cloud interconnect / dedicated port.
+if [ -n "${INTERCONNECT_IP:-}" ] && [ -n "${INTERCONNECT_VRF:-}" ]; then
+  IC_IF=$(ip -br addr | awk -v ip="$INTERCONNECT_IP" '$0 ~ ip {split($1,a,"@"); print a[1]; exit}')
+  if [ -n "$IC_IF" ]; then
+    ip link set "$IC_IF" master "$INTERCONNECT_VRF" up
+    ip addr replace "$INTERCONNECT_IP" dev "$IC_IF"
+    echo "interconnect: $IC_IF ($INTERCONNECT_IP) -> $INTERCONNECT_VRF"
+  else
+    echo "WARNING: no interface with $INTERCONNECT_IP found" >&2
+  fi
 fi
 
 exec /usr/lib/frr/docker-start

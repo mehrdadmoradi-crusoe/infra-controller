@@ -186,6 +186,36 @@ docker exec dpu-hbn-02 ip vrf exec vrf-green ping -c 3 -W 1 -I 10.20.20.1 10.10.
 docker exec dpu-hbn-02 ip -s link show vni2024549
 ```
 
+## 6b. Cloud VPC Interconnect (L3-architecture version)
+
+The border leaf holds the customer VRF; `gcp-router` (AS 16550, the real GCP
+Partner Interconnect ASN) advertises the "GCP VPC" 10.128.0.0/20 over the
+dedicated-port network. Enabling the interconnect = one BGP session in the VRF.
+
+```sh {"name":"interconnect-up"}
+frr/interconnect-up.sh
+```
+
+```sh {"name":"interconnect-verify"}
+docker exec tor-leaf-01 vtysh -c 'show bgp vrf vrf-blue summary'
+docker exec dpu-hbn-01 vtysh -c 'show ip route vrf vrf-blue'
+```
+
+```sh {"name":"ping-vpc-to-gcp"}
+docker exec dpu-hbn-01 ip vrf exec vrf-blue ping -c 3 -W 1 -I 10.10.10.1 10.128.0.1
+```
+
+```sh {"name":"ping-gcp-to-vpc"}
+docker exec gcp-router ping -c 2 -W 1 -I 10.128.0.1 10.10.10.1
+```
+
+```sh {"name":"interconnect-down"}
+frr/interconnect-down.sh
+sleep 5
+docker exec dpu-hbn-01 ip vrf exec vrf-blue ping -c 2 -W 1 -I 10.10.10.1 10.128.0.1 || echo "--- withdrawn: unreachable (expected) ---"
+frr/interconnect-up.sh
+```
+
 ## 7. Failure and reconvergence
 
 ```sh {"name":"kill-dpu1"}
