@@ -62,9 +62,13 @@ kubectl logs -n nico-system deploy/machine-a-tron --tail=15
 Run the setup block first — the port-forward stays up in the background.
 Re-run it any time you see `Failed to dial ... EOF`.
 
-```sh {"background":"true","name":"port-forward"}
+```sh {"name":"port-forward"}
 pkill -f "port-forward -n nico-system" 2>/dev/null
-kubectl port-forward -n nico-system deploy/nico-api 1079:1079
+sleep 1
+nohup kubectl port-forward -n nico-system deploy/nico-api 1079:1079 >/tmp/nico-pf.log 2>&1 &
+disown
+sleep 2
+grep -m1 "Forwarding from" /tmp/nico-pf.log && echo "port-forward UP (survives this cell)" || cat /tmp/nico-pf.log
 ```
 
 ```sh {"name":"extract-certs"}
