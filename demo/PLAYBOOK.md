@@ -103,29 +103,16 @@ grpcurl -insecure --cert /tmp/nico-certs/tls.crt --key /tmp/nico-certs/tls.key \
   localhost:1079 forge.Forge.CreateVpc
 ```
 
-Peer the playbook VPC with vpc-blue (IDs are looked up automatically):
+Peer the playbook VPC with vpc-blue (IDs looked up automatically):
 
 ```sh {"name":"vpc-peering-create-api"}
-PB=$(./nico-cli.sh -f json vpc show 2>/dev/null | grep -v IGNORING | jq -r '.vpcs[] | select(.metadata.name=="vpc-playbook") | .id')
-BLUE=$(./nico-cli.sh -f json vpc show 2>/dev/null | grep -v IGNORING | jq -r '.vpcs[] | select(.metadata.name=="vpc-blue") | .id')
-[ -z "$PB" ] && { echo "run the vpc-create cell first"; exit 1; }
-echo "peering vpc-playbook ($PB) <-> vpc-blue ($BLUE)"
-./nico-cli.sh vpc-peering create "$PB" "$BLUE" 2>/dev/null | grep -v IGNORING
-./nico-cli.sh vpc-peering show 2>/dev/null | grep -v IGNORING
+./pb-peer.sh
 ```
 
-Cleanup: removes the playbook VPC's peering, then the VPC itself:
+Cleanup — removes the playbook VPC's peerings, then the VPC itself:
 
 ```sh {"name":"vpc-delete"}
-PB=$(./nico-cli.sh -f json vpc show 2>/dev/null | grep -v IGNORING | jq -r '.vpcs[] | select(.metadata.name=="vpc-playbook") | .id')
-[ -z "$PB" ] && { echo "vpc-playbook not found — nothing to clean"; exit 0; }
-for P in $(./nico-cli.sh -f json vpc-peering show 2>/dev/null | grep -v IGNORING | jq -r --arg id "$PB" '.vpc_peerings[] | select(.vpc_id==$id or .peer_vpc_id==$id) | .id'); do
-  echo "deleting peering $P"
-  ./nico-cli.sh vpc-peering delete "$P" 2>/dev/null | grep -v IGNORING
-done
-grpcurl -insecure --cert /tmp/nico-certs/tls.crt --key /tmp/nico-certs/tls.key \
-  -d "{\"id\":{\"value\":\"$PB\"}}" localhost:1079 forge.Forge.DeleteVpc
-echo "vpc-playbook deleted"
+./pb-cleanup.sh
 ```
 
 ## 4. EVPN fabric — control plane
