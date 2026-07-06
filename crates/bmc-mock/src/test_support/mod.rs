@@ -224,6 +224,34 @@ pub async fn dell_poweredge_r760_bluefield4_bmc(dpu: DpuMachineInfo) -> TestBmcH
     .await
 }
 
+pub async fn nvidia_dgx_vr_bluefield4_dpu_bmc(settings: DpuSettings) -> TestBmcHandle {
+    let machine_info = {
+        let mut mac_pool = TEST_MAC_POOL.lock().unwrap();
+        MachineInfo::Dpu(DpuMachineInfo::new(
+            HostHardwareType::NvidiaDgxVr,
+            &mut mac_pool,
+            settings,
+        ))
+    };
+    test_bmc(machine_router(
+        &machine_info,
+        Arc::new(NoopCallbacks),
+        "test-dpu-id".to_string(),
+        false,
+    ))
+    .await
+}
+
+pub async fn hpe_proliant_dl380a_gen11_bmc() -> TestBmcHandle {
+    test_bmc(machine_router(
+        &host_info(HostHardwareType::HpeProliantDl380aGen11),
+        Arc::new(NoopCallbacks),
+        "test-host-id".to_string(),
+        false,
+    ))
+    .await
+}
+
 pub async fn generic_ami_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HostHardwareType::GenericAmi),

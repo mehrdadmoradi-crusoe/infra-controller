@@ -33,17 +33,23 @@ The cluster must have:
 
 ### Site controller node DPU requirements
 
-If your site controller nodes are equipped with DPUs (BlueField NICs), the DPUs must be fully provisioned and configured **before** the Kubernetes cluster is set up. NICo does not provision the site controller nodes' own DPUs — it only manages DPUs on downstream bare-metal hosts after ingestion.
+Site controller nodes must be equipped with fully provisioned DPUs (Bluefield-3s) which are configured **before** the Kubernetes cluster is set up. We do not support configuring site controller nodes without DPUs today. NICo does not provision the site controller nodes' own DPUs — it only manages DPUs on downstream bare-metal hosts after ingestion.
 
 Specifically, you must complete the following before proceeding:
 
-- Flash the DPU firmware to a supported version using the BlueField Firmware Bundle.
-- Configure the DPU operating mode (DPU mode or NIC mode) to match your site controller networking topology. See the [network prerequisites](prerequisites/network.md) for the supported topologies.
+- Flash the DPU firmware to the latest supported version using the BlueField Firmware Bundle. Latest supported firmware versions:
+
+  | DOCA  | HBN   |
+  | ----- | ----- |
+  | 2.9.3 | 2.4.3 |
+
+- Configure the Bluefield-3 device in DPU mode (operating mode). We do not currently support NIC mode.
 - Ensure the DPU ARM OS is booted and reachable via its management interface.
+- Verify that the DPU can connect to the outside world (curl -I https://www.google.com)
 
 Refer to the NVIDIA DOCA documentation and the BlueField Firmware Bundle download archive for firmware flashing instructions and supported firmware versions:
 
-[https://developer.nvidia.com/doca-2-9-2-lts-ovs-doca-download-archive?deployment_platform=BlueField&deployment_package=BF-FW-Bundle](https://developer.nvidia.com/doca-2-9-2-lts-ovs-doca-download-archive?deployment_platform=BlueField&deployment_package=BF-FW-Bundle)
+[https://developer.nvidia.com/doca-2-9-3-download-archive?deployment_platform=BlueField&deployment_package=BF-FW-Bundle](https://developer.nvidia.com/doca-2-9-3-download-archive?deployment_platform=BlueField&deployment_package=BF-FW-Bundle)
 
 ### Required tools (local machine)
 
@@ -525,9 +531,9 @@ kubectl get svc nico-api -n nico-system -o jsonpath='{.status.loadBalancer.ingre
 Configure the credentials NICo will apply to BMCs and UEFI after ingestion:
 
 ```bash
-nico-admin-cli -c <api-url> credential add-bmc --kind=site-wide-root --password='<password>'
-nico-admin-cli -c <api-url> host generate-host-uefi-password
-nico-admin-cli -c <api-url> credential add-uefi --kind=host --password='<password>'
+nico-admin-cli -a <api-url> credential add-bmc --kind=site-wide-root --password='<password>'
+nico-admin-cli -a <api-url> host generate-host-uefi-password
+nico-admin-cli -a <api-url> credential add-uefi --kind=host --password='<password>'
 ```
 
 ### Upload the Expected Machines Manifest
@@ -550,7 +556,7 @@ Prepare an `expected_machines.json` with the BMC MAC address, factory default cr
 Upload the manifest:
 
 ```bash
-nico-admin-cli -c <api-url> em replace-all --filename expected_machines.json
+nico-admin-cli -a <api-url> em replace-all --filename expected_machines.json
 ```
 
 ### Approve the host for ingestion
@@ -558,7 +564,7 @@ nico-admin-cli -c <api-url> em replace-all --filename expected_machines.json
 NICo uses Measured Boot with TPM v2.0 to enforce cryptographic identity:
 
 ```bash
-nico-admin-cli -c <api-url> att mb site trusted-machine approve \* persist --pcr-registers="0,3,5,6"
+nico-admin-cli -a <api-url> att mb site trusted-machine approve \* persist --pcr-registers="0,3,5,6"
 ```
 
 NICo will now discover the host via Redfish, pair it with its DPU(s), provision the DPU, and bring the host to a ready state. For more details, refer to the [Ingesting Hosts](../provisioning/ingesting-hosts.md) guide.

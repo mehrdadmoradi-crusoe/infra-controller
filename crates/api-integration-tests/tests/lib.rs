@@ -174,6 +174,14 @@ async fn test_integration() -> eyre::Result<()> {
             Ipv4Addr::new(10, 10, 11, 2),
         )
         .boxed(),
+        test_machine_a_tron_singledpu_nic_mode(
+            HostHardwareType::HpeProliantDl380aGen11,
+            &test_env,
+            &bmc_address_registry,
+            // Relay IP in host-inband net
+            Ipv4Addr::new(10, 10, 11, 2),
+        )
+        .boxed(),
         test_machine_a_tron_dpu_to_nic_mode_reregistration(
             HostHardwareType::DellPowerEdgeR750,
             &test_env,

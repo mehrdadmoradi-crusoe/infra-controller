@@ -4,7 +4,7 @@
 openapi: 3.1.0
 info:
   title: NVIDIA Infra Controller REST API
-  version: 1.6.0
+  version: 2.0.0
   summary: NVIDIA Infra Controller REST API is the RESTful gateway for accessing the NVIDIA Infra Controller service
   description: 'NVIDIA Infra Controller REST API allows users to create and manage resources, e.g., VPCs, Subnets, and Instances, across all connected NVIDIA Infra Controller datacenters, also referred to as Sites.'
   license:
@@ -118,6 +118,9 @@ tags:
 
       - `rackLevelAdministration` capability attribute was deprecated in favor of `flow` and was removed on May 13th, 2026 0:00 UTC. Please use `flow` instead.
       - `isRackLevelAdministrationEnabled` query parameter was deprecated in favor of `isFlowEnabled` and was removed on May 13th, 2026 0:00 UTC. Please use `isFlowEnabled` instead.
+  - name: BMC Credential
+    description: |-
+      BMC Credential endpoints allow creating and updating BMC credentials across all Machines of a Site
   - name: Allocation
     description: |-
       Allocations are the mechanism by which Provider can delegate Network and Compute resources to Tenant.
@@ -179,6 +182,10 @@ tags:
   - name: Operating System
     description: |-
       Operating Systems in NICo are typically iPXE scripts that are used to boot Machines.
+
+      Deprecation history:
+
+      - `isCloudInit` on create and update requests is deprecated and ignored; the response field is derived from whether `userData` is non-empty.
   - name: Instance Type
     description: |-
       Instance Types allow grouping Machines into a pool defined by their capabilities. Providers can then allocate a portion of the Instance Type pool to a Tenant.
@@ -188,6 +195,17 @@ tags:
   - name: Machine
     description: |-
       Machine is a physical server that contains CPUs, GPUs, memory, storage, and networking hardware. Machines are the physical building blocks of a Site.
+  - name: BMC Reset
+    x-displayName: BMC Reset
+    description: |-
+      BMC Reset allows resetting a Machine's BMC
+  - name: DPU Reprovision
+    x-DisplayName: DPU Reprovision
+    description: |-
+      DPU Reprovision allows re-provisioning Machine's DPUs
+  - name: Health Report
+    description: |-
+      Machine Health Report contains information about the health of a Machine including user enforced overrides
   - name: Machine Capability
     description: |-
       Machine Capability defines the hardware capabilities of a Machine. Machine Capabilities can be used to group Machines into Instance Types.
@@ -234,6 +252,26 @@ tags:
   - name: Metadata
     description: |-
       Metadata describes various system-level attributes of the API service.
+  - name: Host Firmware Config
+    description: |-
+      Host firmware configuration defines known firmware versions, artifact
+      locations, update ordering, and per-component defaults for a given
+      hardware vendor and model on a Site.
+
+      Provider Admins use PUT to create or merge host firmware config entries
+      in Core via `UpsertHostFirmwareConfig`. Configurations are keyed by
+      `(vendor, model)`; repeated PUTs merge firmware versions for
+      components already present and add new component types when supplied
+      together with an updated `ordering`. Returns `201 Created` on first
+      create and `200 OK` on subsequent updates.
+
+      Provider Admins use DELETE to remove a host firmware config entry from
+      Core via `DeleteHostFirmwareConfig`, keyed by `(vendor, model)`.
+      Returns `204 No Content` on success.
+
+      User must have authorization role with `PROVIDER_ADMIN` suffix in the
+      URL `{org}`, and the Site must belong to the org's Infrastructure
+      Provider.
   - name: Tenant Identity
     description: |-
       Tenant identity (JWT-SVID issuance) and RFC 8693 token delegation.
@@ -282,39 +320,6 @@ tags:
       - `rackLevelAdministration` capability attribute was deprecated in favor of `flow` and was removed on May 13th, 2026 0:00 UTC. Please use `flow` instead.
       - `isRackLevelAdministrationEnabled` query parameter was deprecated in favor of `isFlowEnabled` and was removed on May 13th, 2026 0:00 UTC. Please use `isFlowEnabled` instead.
 paths:
-  '/v2/org/{org}/nico/credential/bmc':
-    parameters:
-      - schema:
-          type: string
-        name: org
-        in: path
-        required: true
-        description: Name of the Org
-    put:
-      summary: Create Or Update BMC Credential
-      tags:
-        - BMC Credential
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/BMCCredentialRequest'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BMCCredential'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-      operationId: create-or-update-bmc-credential
-      description: |-
-        Create or update a site-wide or per-BMC root credential. Equivalent
-        to `carbide-admin-cli credential add-bmc`.
-
-        User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/service-account/current':
     parameters:
       - schema:
@@ -799,7 +804,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -1070,7 +1075,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -1159,6 +1164,39 @@ paths:
           in: query
           name: orderBy
           description: Ordering for pagination query
+  '/v2/org/{org}/nico/credential/bmc':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Create Or Update BMC Credential
+      tags:
+        - BMC Credential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BMCCredentialRequest'
+      responses:
+        '202':
+          description: Machine power control request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BMCCredential'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      operationId: create-or-update-bmc-credential
+      description: |-
+        Create or update a site-wide or per-BMC root credential. Equivalent
+        to `carbide-admin-cli credential add-bmc`.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/allocation':
     parameters:
       - schema:
@@ -1505,7 +1543,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -1938,7 +1976,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -2420,7 +2458,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -4962,7 +5000,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -5292,7 +5330,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -5686,7 +5724,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -5930,7 +5968,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -6953,7 +6991,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -7812,7 +7850,7 @@ paths:
                       rootFsId: 6c2ac315-3040-4728-94eb-b66d320206c1
                       ipxeScript: null
                       userData: null
-                      isCloudInit: true
+                      isCloudInit: false
                       phoneHomeEnabled: false
                       allowOverride: false
                       siteAssociations:
@@ -8099,7 +8137,7 @@ paths:
                   rootFsId: 6c2ac315-3040-4728-94eb-b66d320206c1
                   rootFsLabel: null
                   userData: null
-                  isCloudInit: true
+                  isCloudInit: false
                   phoneHomeEnabled: false
                   allowOverride: false
       tags:
@@ -8147,7 +8185,7 @@ paths:
                     rootFsLabel: null
                     ipxeScript: null
                     userData: null
-                    isCloudInit: true
+                    isCloudInit: false
                     phoneHomeEnabled: false
                     allowOverride: false
                     siteAssociations:
@@ -8268,7 +8306,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -9104,7 +9142,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -9123,6 +9161,264 @@ paths:
           description: Describes an error response for 500 Internal Server Error
           $ref: '#/components/responses/GenericHttpError'
       description: Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+  '/v2/org/{org}/nico/machine/{machineId}/bmc-reset':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    post:
+      summary: Reset Machine BMC
+      tags:
+        - BMC Reset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BmcResetRequest'
+      responses:
+        '202':
+          description: Machine BMC reset request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: Machine BMC reset request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: reset-machine-bmc
+      description: |-
+        Reset BMC of a specific Machine.
+        
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
+  '/v2/org/{org}/nico/machine/{machineId}/dpu/reprovision':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    patch:
+      summary: Reprovision Machine DPUs
+      tags:
+        - DPU Reprovision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DpuReprovisionRequest'
+      responses:
+        '202':
+          description: DPU reprovisioning request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: DPU reprovisioning request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: reprovision-machine-dpu
+      description: |-
+        Trigger DPU reprovisioning for a Machine. It may be necessary to create a `HostUpdateInProgress` health report for the Machine before DPU reprovisioning can be triggered.
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
+  '/v2/org/{org}/nico/machine/{machineId}/health-report':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    get:
+      summary: Retrieve all Machine health reports
+      tags:
+        - Health Report
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MachineHealthReportEntry'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: get-machine-health-report
+      description: |-
+        Get all health reports for a specific Machine.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
+    put:
+      summary: Create or update Machine health report
+      tags:
+        - Health Report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineHealthReportEntryRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineHealthReportEntry'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: create-or-update-machine-health-report
+      description: |-
+        Add or update health report override for a specific Machine.
+        
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
+  '/v2/org/{org}/nico/machine/{machineId}/health-report/{source}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: string
+        name: source
+        in: path
+        required: true
+        description: Health report source
+    delete:
+      summary: Delete Machine health report
+      tags:
+        - Health Report
+      responses:
+        '204':
+          description: Machine health report was successfully removed
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: delete-machine-health-report
+      description: |-
+        Remove a health report override for a specific Machine.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
+  '/v2/org/{org}/nico/machine/{machineId}/power':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    patch:
+      summary: Machine power control
+      tags:
+        - Machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachinePowerControlRequest'
+            examples:
+              turn-on:
+                value:
+                  action: 'On'
+              force-restart:
+                value:
+                  action: ForceRestart
+      responses:
+        '202':
+          description: Machine power control request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: Power control accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: machine-power-control-machine
+      description: |-
+        Execute power control actions for a specific Machine.
+        
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/machine/{machineId}/status-history':
     parameters:
       - schema:
@@ -11573,7 +11869,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -12152,7 +12448,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -12447,7 +12743,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeletionAcceptedResponse'
+                $ref: '#/components/schemas/MessageResponse'
               examples:
                 example-1:
                   value:
@@ -12713,6 +13009,85 @@ paths:
         Retrieve a specific Audit Log Entry by ID
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix
+  '/v2/org/{org}/nico/firmware-config/host':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Create or Update Host Firmware Config
+      tags:
+        - Host Firmware Config
+      operationId: create-or-update-host-firmware-config
+      description: |-
+        Create or update host firmware config for the org/site. The target Site
+        is specified by `siteId` in the request body.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix in the URL `{org}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HostFirmwareConfigCreateOrUpdateRequest'
+      responses:
+        '200':
+          description: Host firmware config replaced/updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostFirmwareConfig'
+        '201':
+          description: Host firmware config created on first call
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostFirmwareConfig'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          description: Internal server error while loading the Provider or Site, contacting the Core gRPC API, starting the Host Firmware Config create or update workflow, or after the workflow timed out and was terminated.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/HostFirmwareConfigCoreUnavailable'
+    delete:
+      summary: Delete Host Firmware Config
+      tags:
+        - Host Firmware Config
+      operationId: delete-host-firmware-config
+      description: |-
+        Delete host firmware config for the org/site. The target Site is
+        specified by `siteId` in the request body; the configuration is
+        keyed by `(vendor, model)`.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix in the URL `{org}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HostFirmwareConfigDeleteRequest'
+      responses:
+        '204':
+          description: Host firmware config deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          description: Internal server error while loading the Provider or Site, contacting the Core gRPC API, starting the Host Firmware Config delete workflow, or after the workflow timed out and was terminated.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/HostFirmwareConfigCoreUnavailable'
   '/v2/org/{org}/nico/site/{siteID}/tenant-identity/config':
     parameters:
       - schema:
@@ -13150,6 +13525,429 @@ components:
         macAddress:
           type: string
           description: BMC MAC address. Required for kind BMCRoot, ignored for SiteWideRoot.
+    BmcResetRequest:
+      type: object
+      title: BmcResetRequest
+      description: Request to reset a Machine BMC
+      properties:
+        useIpmiTool:
+          type: boolean
+          default: false
+          description: Reset the BMC via ipmitool instead of Redfish.
+      examples:
+        - useIpmiTool: true
+    DpuReprovisionRequest:
+      type: object
+      title: DpuReprovisionRequest
+      description: Request to trigger DPU reprovisioning for a Machine
+      required:
+        - mode
+      properties:
+        mode:
+          type: string
+          description: DPU reprovisioning mode.
+          enum:
+            - Set
+            - Clear
+            - Restart
+        updateFirmware:
+          type: boolean
+          default: false
+          description: Whether to update firmware during reprovisioning.
+      examples:
+        - mode: Restart
+          updateFirmware: true
+    MachineHealthReportEntry:
+      type: object
+      title: MachineHealthReportEntry
+      description: Machine health report entry
+      required:
+        - source
+        - mode
+      properties:
+        source:
+          type: string
+          description: Health report source.
+        triggeredBy:
+          type: string
+          description: Person or system that triggered this health report.
+        observedAt:
+          type: string
+          format: date-time
+          description: Date/time when the health report was observed.
+        successes:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeSuccess'
+          description: Results from successful health probes for the Machine.
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeAlert'
+          description: Results from failed health probes for the Machine.
+        mode:
+          type: string
+          description: How this health report was updated
+          enum:
+            - Merge
+            - Replace
+      examples:
+        - source: overrides.sre
+          triggeredBy: operator
+          observedAt: '2026-06-24T12:00:00Z'
+          mode: Merge
+          alerts:
+            - id: dpu.reprovision.in.progress
+              message: DPU reprovisioning in progress
+              classifications:
+                - maintenance
+    MachineHealthReportEntryRequest:
+      type: object
+      title: MachineHealthReportEntryRequest
+      description: Request to add or update a Machine health report override.
+      required:
+        - source
+        - mode
+      properties:
+        source:
+          type: string
+          description: Health report source.
+        successes:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeSuccess'
+          description: Results from successful health probes for the Machine.
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeAlert'
+          description: Results from failed health probes for the Machine.
+        mode:
+          type: string
+          description: How updates to this health report should be handled
+          enum:
+            - Merge
+            - Replace
+      examples:
+        - source: overrides.sre
+          mode: Merge
+          alerts:
+            - id: dpu.reprovision.in.progress
+              message: DPU reprovisioning in progress
+              classifications:
+                - maintenance
+    HostFirmwareArtifact:
+      type: object
+      title: HostFirmwareArtifact
+      description: Location of a firmware artifact used during host firmware updates.
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          minLength: 1
+          description: URL from which the firmware artifact can be downloaded.
+        sha256:
+          type: string
+          description: Optional SHA-256 digest of the artifact, in lowercase hex.
+      example:
+        url: https://firmware.example.invalid/28.47.2682/fw.bin
+        sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+    HostFirmwareVersionConfig:
+      type: object
+      title: HostFirmwareVersionConfig
+      description: One known firmware version for a host firmware component.
+      required:
+        - version
+        - artifacts
+      properties:
+        version:
+          type: string
+          minLength: 1
+          description: Firmware version string reported by inventory and stored in Core.
+        default:
+          type: boolean
+          default: false
+          description: When `true`, marks this version as the default target for the component.
+        artifacts:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/HostFirmwareArtifact'
+          description: Artifact locations used to install this firmware version.
+        installOnlySpecified:
+          type: boolean
+          default: false
+          description: When `true`, install only the artifacts explicitly listed for this version.
+        powerDrainsNeeded:
+          type: integer
+          minimum: 0
+          description: Optional number of power drains required after installing this version.
+        preUpdateResets:
+          type: boolean
+          default: false
+          description: When `true`, perform pre-update resets before installing this version.
+        preingestionExclusiveConfig:
+          type: boolean
+          description: |-
+            Optional. When `true`, this firmware version applies only during BMC
+            pre-ingestion. Omitted on update preserves the stored value; set to
+            `false` to clear a previously stored value.
+      example:
+        version: '28.47.2682'
+        default: true
+        artifacts:
+          - url: https://firmware.example.invalid/28.47.2682/fw.bin
+            sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+        installOnlySpecified: false
+        preUpdateResets: false
+        preingestionExclusiveConfig: false
+    HostFirmwareComponentConfig:
+      type: object
+      title: HostFirmwareComponentConfig
+      description: One component entry in a host firmware config upsert request.
+      required:
+        - type
+        - firmware
+      properties:
+        type:
+          $ref: '#/components/schemas/HostFirmwareComponentType'
+        firmware:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/HostFirmwareVersionConfig'
+          description: Known firmware versions for this component. Versions are merged by version string on update.
+        preingestUpgradeWhenBelow:
+          type: string
+          minLength: 1
+          description: |-
+            Optional minimum firmware version required before BMC pre-ingestion can
+            complete. Omitted on update preserves the stored value.
+    HostFirmwareComponent:
+      type: object
+      title: HostFirmwareComponent
+      description: One component entry in a stored host firmware config response.
+      required:
+        - type
+        - firmware
+      properties:
+        type:
+          $ref: '#/components/schemas/HostFirmwareComponentType'
+        currentVersionDetectionRegEx:
+          type: string
+          readOnly: true
+          description: Inventory regex Core uses to match reported versions for this component.
+        preingestUpgradeWhenBelow:
+          type: string
+          readOnly: true
+          description: Minimum firmware version required before BMC pre-ingestion can complete.
+        firmware:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostFirmwareVersionConfig'
+          description: Known firmware versions currently stored for this component.
+    HostFirmwareConfigCreateOrUpdateRequest:
+      type: object
+      title: HostFirmwareConfigCreateOrUpdateRequest
+      description: |-
+        Host firmware configuration upsert payload. Configurations are keyed by
+        `(vendor, model)` on the Site's Core instance. On first create,
+        `ordering` must list every component being configured. On update,
+        newly added components must also appear in `ordering`.
+      required:
+        - siteId
+        - vendor
+        - model
+        - components
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site where the host firmware config is stored.
+        vendor:
+          type: string
+          minLength: 1
+          description: Hardware vendor for the configuration (for example `Nvidia`, `Dell`).
+        model:
+          type: string
+          minLength: 1
+          description: Hardware model for the configuration (for example `DGXH100`).
+        components:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/HostFirmwareComponentConfig'
+          description: Component firmware entries to create or merge.
+        explicitStartNeeded:
+          type: boolean
+          description: |-
+            Optional. When `true`, host firmware updates for this vendor/model
+            require an explicit start. Omitted on update leaves the stored
+            value unchanged.
+        ordering:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostFirmwareComponentType'
+          description: |-
+            Update order for configured components. Required on first create.
+            Must include every configured component and must be updated when
+            adding a new component on subsequent PUTs.
+      examples:
+        - siteId: 00000000-0000-0000-0000-000000000001
+          vendor: Nvidia
+          model: DGXH100
+          explicitStartNeeded: true
+          ordering:
+            - Cx7
+            - BMC
+          components:
+            - type: Cx7
+              firmware:
+                - version: '28.47.2682'
+                  default: true
+                  installOnlySpecified: true
+                  powerDrainsNeeded: 1
+                  preUpdateResets: true
+                  artifacts:
+                    - url: https://firmware.example.invalid/28.47.2682/fw.bin
+                      sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+    HostFirmwareConfigDeleteRequest:
+      type: object
+      title: HostFirmwareConfigDeleteRequest
+      description: Host firmware configuration delete payload.
+      required:
+        - siteId
+        - vendor
+        - model
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site where the host firmware config is stored.
+        vendor:
+          type: string
+          minLength: 1
+          description: Hardware vendor for the configuration (for example `Nvidia`, `Dell`).
+        model:
+          type: string
+          minLength: 1
+          description: Hardware model for the configuration (for example `DGXH100`).
+      examples:
+        - siteId: 00000000-0000-0000-0000-000000000001
+          vendor: Nvidia
+          model: DGXH100
+    HostFirmwareConfig:
+      type: object
+      title: HostFirmwareConfig
+      description: Stored host firmware configuration returned after create or update.
+      required:
+        - vendor
+        - model
+        - components
+        - explicitStartNeeded
+        - ordering
+        - created
+        - updated
+      properties:
+        vendor:
+          type: string
+          readOnly: true
+          description: Hardware vendor for the configuration.
+        model:
+          type: string
+          readOnly: true
+          description: Hardware model for the configuration.
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostFirmwareComponent'
+          description: Stored component firmware entries.
+        explicitStartNeeded:
+          type: boolean
+          readOnly: true
+          description: Whether host firmware updates require an explicit start.
+        ordering:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostFirmwareComponentType'
+          readOnly: true
+          description: Stored update order for configured components.
+        created:
+          type: string
+          format: date-time
+          readOnly: true
+          description: When this vendor/model configuration was first created.
+        updated:
+          type: string
+          format: date-time
+          readOnly: true
+          description: When this vendor/model configuration was last updated.
+      examples:
+        - vendor: Nvidia
+          model: DGXH100
+          explicitStartNeeded: true
+          ordering:
+            - Cx7
+            - BMC
+          components:
+            - type: BMC
+              firmware:
+              - version: '2.3.7'
+                default: true
+                installOnlySpecified: false
+                powerDrainsNeeded: 0
+                preUpdateResets: false
+                artifacts:
+                  - url: https://firmware.example.invalid/2.3.7/fw.bin
+                    sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+            - type: Cx7
+              firmware:
+                - version: '28.47.2682'
+                  default: true
+                  installOnlySpecified: true
+                  powerDrainsNeeded: 1
+                  preUpdateResets: true
+                  artifacts:
+                    - url: https://firmware.example.invalid/28.47.2682/fw.bin
+                      sha256: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+          created: '2025-08-24T14:15:22Z'
+          updated: '2025-08-24T14:15:22Z'
+    HostFirmwareComponentType:
+      type: string
+      title: HostFirmwareComponentType
+      description: Host firmware component type exposed by the REST API.
+      enum:
+        - BMC
+        - CEC
+        - UEFI
+        - NIC
+        - CpldMb
+        - CpldPdb
+        - HgxBmc
+        - CombinedBmcUefi
+        - GPU
+        - Cx7
+    MachinePowerControlRequest:
+      type: object
+      title: MachinePowerControlRequest
+      description: Request to power control a Machine
+      required:
+        - action
+      properties:
+        action:
+          type: string
+          description: Power control action to apply.
+          enum:
+            - 'On'
+            - GracefulShutdown
+            - ForceOff
+            - GracefulRestart
+            - ForceRestart
+            - ACPowercycle
+        acknowledgeAttachedInstance:
+          type: boolean
+          description: Acknowledges that an Instance is currently attached to the Machine.
     InfrastructureProvider:
       description: Infrastructure providers own and manage datacenters
       type: object
@@ -15708,7 +16506,7 @@ components:
           rootFsLabel: null
           ipxeScript: null
           userData: null
-          isCloudInit: true
+          isCloudInit: false
           phoneHomeEnabled: false
           isActive: true
           deactivationNote: null
@@ -15884,7 +16682,7 @@ components:
           description: User data for the Operating System
         isCloudInit:
           type: boolean
-          description: Specified when the Operating System is cloud-init based
+          description: Whether the Operating System is cloud-init based; true if there is non-empty `userData`, false otherwise.
         phoneHomeEnabled:
           type: boolean
           description: Indicates whether the Phone Home service should be enabled or disabled for Operating System
@@ -16017,7 +16815,7 @@ components:
           imageAuthToken: acbd18db4cc2f85cedef654fccc4a4d8
           imageDisk: /dev/sda
           rootFsId: 6c2ac315-3040-4728-94eb-b66d320206c1
-          isCloudInit: true
+          isCloudInit: false
           allowOverride: false
       description: Request data to create an OperatingSystem
       properties:
@@ -16104,7 +16902,8 @@ components:
           description: User data for the Operating System
         isCloudInit:
           type: boolean
-          description: Specified when the Operating System is cloud-init based
+          deprecated: true
+          description: 'Deprecated and ignored: whether the Operating System is cloud-init based. Value now derived from `userData`.'
         allowOverride:
           type: boolean
           description: Indicates if the user data can be overridden at Instance creation time
@@ -16126,7 +16925,7 @@ components:
           imageAuthToken: acbd18db4cc2f85cedef654fccc4a4d8
           imageDisk: /dev/sda
           rootFsId: 6c2ac315-3040-4728-94eb-b66d320206c1
-          isCloudInit: true
+          isCloudInit: false
           allowOverride: false
         - isActive: false
           deactivationNote: 'iPXE script is referencing a URL that is unreachable, needs to be researched'
@@ -16199,7 +16998,8 @@ components:
           type:
             - boolean
             - 'null'
-          description: Specified when the Operating System is cloud-init based
+          deprecated: true
+          description: 'Deprecated and ignored: whether the Operating System is cloud-init based. Value now derived from `userData`.'
         allowOverride:
           type:
             - boolean
@@ -19991,6 +20791,8 @@ components:
       title: MachineHealthProbeSuccess
       type: object
       description: Describes results of successful Machine health probe
+      required:
+        - id
       examples:
         - id: FanSpeed
           target: System Board Fan1A
@@ -20007,6 +20809,9 @@ components:
       title: MachineHealthProbeAlert
       type: object
       description: Describes results of a failed Machine health probe
+      required:
+        - id
+        - message
       examples:
         - id: FailedValidationTest
           target: DcgmFullShort
@@ -20032,6 +20837,7 @@ components:
           type:
             - string
             - 'null'
+          format: date-time
           description: Date/time since the alert has been in effect
         message:
           type: string
@@ -23216,16 +24022,16 @@ components:
         notice:
           type: string
           description: Message describing the deprecation
-    DeletionAcceptedResponse:
-      title: DeletionAcceptedResponse
+    MessageResponse:
+      title: MessageResponse
       type: object
-      description: JSON body for accepted asynchronous DELETE requests
+      description: Structured response with a human-readable message
       required:
         - message
       properties:
         message:
           type: string
-          description: Human-readable outcome of the delete request
+          description: Human-readable outcome of the request
       example:
         message: Deletion request was accepted
     NICoAPIError:
@@ -23874,7 +24680,7 @@ components:
       properties:
         id:
           type: string
-          description: ID of the DPU Machine (matches the host Machine ID for the DPU as reported by NICo Core)
+          description: ID of the DPU Machine
         infrastructureProviderId:
           type: string
           format: uuid
@@ -23915,7 +24721,7 @@ components:
           description: Labels associated with the DPU
         state:
           type: string
-          description: Lifecycle state of the DPU as reported by NICo Core
+          description: Lifecycle state of the DPU
         dpuNetworkConfig:
           $ref: '#/components/schemas/DpuNetworkConfig'
           description: Complete network configuration sent to the DPU agent
@@ -23924,7 +24730,7 @@ components:
             - string
             - 'null'
           format: date-time
-          description: Last reboot timestamp reported by NICo Core
+          description: Last reboot timestamp
         placementInRack:
           $ref: '#/components/schemas/PlacementInRack'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
@@ -24380,6 +25186,12 @@ components:
                 message: Error validating request data
                 data:
                   name: A value is required
+    HostFirmwareConfigCoreUnavailable:
+      description: Core gRPC API is unavailable, so the host firmware config request cannot be served.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NICoAPIError'
     TenantIdentityCoreUnavailable:
       description: |-
         Core gRPC API is unavailable, or site-level machine identity is

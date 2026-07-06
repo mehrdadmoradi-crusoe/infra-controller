@@ -312,6 +312,8 @@ impl InternalRBACRules {
         x.perm("FindNetworkDevicesByDeviceIds", vec![ForgeAdminCLI]);
         x.perm("CreateCredential", vec![ForgeAdminCLI]);
         x.perm("DeleteCredential", vec![ForgeAdminCLI]);
+        x.perm("RotateCredential", vec![ForgeAdminCLI]);
+        x.perm("GetCredentialRotationStatus", vec![ForgeAdminCLI]);
         x.perm("GetRouteServers", vec![ForgeAdminCLI]);
         x.perm("AddRouteServers", vec![ForgeAdminCLI]);
         x.perm("RemoveRouteServers", vec![ForgeAdminCLI]);
@@ -884,6 +886,10 @@ impl InternalRBACRules {
         x.perm("ComponentPowerControl", vec![ForgeAdminCLI, Flow]);
         x.perm("GetComponentInventory", vec![ForgeAdminCLI, Flow]);
         x.perm("UpdateComponentFirmware", vec![ForgeAdminCLI, Flow]);
+        x.perm(
+            "ComponentConfigureSwitchCertificate",
+            vec![ForgeAdminCLI, Flow],
+        );
         x.perm("GetComponentFirmwareStatus", vec![ForgeAdminCLI, Flow]);
         x.perm("ListComponentFirmwareVersions", vec![ForgeAdminCLI, Flow]);
         x.perm("GetDPFHostSnapshot", vec![ForgeAdminCLI]);

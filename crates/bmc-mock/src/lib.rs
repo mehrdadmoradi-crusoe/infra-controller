@@ -66,6 +66,8 @@ pub enum HostHardwareType {
     NvidiaDgxGb300,
     #[serde(rename = "supermicro_gb300_nvl")]
     SupermicroGb300Nvl,
+    #[serde(rename = "nvidia_dgx_vr")]
+    NvidiaDgxVr,
     #[serde(rename = "liteon_power_shelf")]
     LiteOnPowerShelf,
     #[serde(rename = "nvidia_switch_nd5200_ld")]
@@ -74,6 +76,8 @@ pub enum HostHardwareType {
     NvidiaDgxH100,
     #[serde(rename = "generic_ami")]
     GenericAmi,
+    #[serde(rename = "hpe_proliant_dl380a_gen11")]
+    HpeProliantDl380aGen11,
     /// A non-GB300 Supermicro-vendor server (no NVIDIA GB300 GPU chassis). Reuses the
     /// generic-server representation but reports a Supermicro vendor; used to assert that
     /// the `is_gb300()` gate keeps such a box classified as generic `Supermicro`.
@@ -90,10 +94,12 @@ impl fmt::Display for HostHardwareType {
             Self::LenovoGB300Nvl => "Lenovo GB300 NVL".fmt(f),
             Self::NvidiaDgxGb300 => "NVIDIA DGX GB300 NVL".fmt(f),
             Self::SupermicroGb300Nvl => "Supermicro GB300 NVL".fmt(f),
+            Self::NvidiaDgxVr => "NVIDIA DGX VR NVL".fmt(f),
             Self::LiteOnPowerShelf => "Lite-On Power Shelf".fmt(f),
             Self::NvidiaSwitchNd5200Ld => "NVIDIA Switch ND5200_LD".fmt(f),
             Self::NvidiaDgxH100 => "NVIDIA DGX H100".fmt(f),
             Self::GenericAmi => "Generic AMI Server".fmt(f),
+            Self::HpeProliantDl380aGen11 => "HPE ProLiant DL380a Gen11".fmt(f),
             Self::GenericSupermicro => "Generic Supermicro Server".fmt(f),
         }
     }
@@ -111,10 +117,12 @@ impl HostHardwareType {
             Self::LenovoGB300Nvl => Some(1),
             Self::NvidiaDgxGb300 => Some(1),
             Self::SupermicroGb300Nvl => Some(1),
+            Self::NvidiaDgxVr => Some(1),
             Self::LiteOnPowerShelf => Some(0),
             Self::NvidiaSwitchNd5200Ld => Some(0),
             Self::NvidiaDgxH100 => Some(1),
             Self::GenericAmi => None,
+            Self::HpeProliantDl380aGen11 => None,
             Self::GenericSupermicro => None,
         }
     }
