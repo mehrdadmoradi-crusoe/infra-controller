@@ -139,54 +139,26 @@ pub async fn find(
     filter: ObjectColumnFilter<'_, IdColumn>,
 ) -> Result<Vec<InstanceSnapshot>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
-        "SELECT row_to_json(i.*), row_to_json(o.*) FROM instances i \
+        "SELECT row_to_json(i.*) AS instance, row_to_json(o.*) AS operating_system \
+         FROM instances i \
          LEFT JOIN operating_systems o ON i.operating_system_id = o.id AND o.deleted IS NULL",
     )
     .filter_relation(&filter, Some("i"));
-    let rows: Vec<(serde_json::Value, Option<serde_json::Value>)> = query
+    let rows: Vec<InstanceAndOsRow> = query
         .build_query_as()
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
-    let mut snapshots = Vec::with_capacity(rows.len());
-    for (instance_json, os_json) in rows {
-        let pg_json: InstanceSnapshotPgJson =
-            serde_json::from_value(instance_json).map_err(|e| DatabaseError::Internal {
-                message: format!("instance snapshot json decode: {e}"),
-            })?;
-        let snapshot = match os_json {
-            Some(oj) => {
-                let os_row: OsRow =
-                    serde_json::from_value(oj).map_err(|e| DatabaseError::Internal {
-                        message: format!("operating_system row json decode: {e}"),
-                    })?;
-                let os = build_operating_system_for_snapshot(&os_row, &pg_json);
-                snapshot::from_pg_json_and_os(pg_json, os).map_err(|e| DatabaseError::Internal {
-                    message: format!("instance snapshot from_pg_json_and_os: {e}"),
-                })?
-            }
-            None => InstanceSnapshot::try_from(pg_json).map_err(|e| DatabaseError::Internal {
-                message: format!("instance snapshot try_from: {e}"),
-            })?,
-        };
-        snapshots.push(snapshot);
-    }
-    Ok(snapshots)
+    rows.into_iter().map(InstanceSnapshot::try_from).collect()
 }
 
-/// Converts raw JSON rows to InstanceSnapshots, batch-loading OS definitions as needed.
+/// Converts decoded snapshot rows to InstanceSnapshots, batch-loading OS
+/// definitions as needed.
 async fn resolve_snapshots_from_json_rows(
     txn: &mut PgConnection,
-    rows: Vec<(serde_json::Value,)>,
+    rows: Vec<(Json<InstanceSnapshotPgJson>,)>,
 ) -> Result<Vec<InstanceSnapshot>, DatabaseError> {
-    let mut pg_jsons: Vec<InstanceSnapshotPgJson> = Vec::with_capacity(rows.len());
-    for (json,) in rows {
-        let pg_json: InstanceSnapshotPgJson =
-            serde_json::from_value(json).map_err(|e| DatabaseError::Internal {
-                message: format!("instance snapshot json decode: {e}"),
-            })?;
-        pg_jsons.push(pg_json);
-    }
+    let pg_jsons: Vec<InstanceSnapshotPgJson> = rows.into_iter().map(|(json,)| json.0).collect();
     if pg_jsons.is_empty() {
         return Ok(Vec::new());
     }
@@ -372,7 +344,7 @@ pub async fn find_by_machine_ids(
         return Ok(Vec::new());
     }
     let query = "SELECT row_to_json(i.*) from instances i WHERE machine_id = ANY($1)";
-    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(query)
+    let rows: Vec<(Json<InstanceSnapshotPgJson>,)> = sqlx::query_as(query)
         .bind(machine_ids)
         .fetch_all(&mut *txn)
         .await
@@ -401,7 +373,7 @@ pub async fn find_by_extension_service(
     }
     builder.push(")");
 
-    let rows: Vec<(serde_json::Value,)> = builder
+    let rows: Vec<(Json<InstanceSnapshotPgJson>,)> = builder
         .build_query_as()
         .fetch_all(&mut *txn)
         .await
@@ -938,7 +910,7 @@ pub async fn batch_persist<'a>(
 
     // Fetch the inserted instances, resolving OS definitions as needed.
     let query = "SELECT row_to_json(i.*) FROM instances i WHERE i.id = ANY($1)";
-    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(query)
+    let rows: Vec<(Json<InstanceSnapshotPgJson>,)> = sqlx::query_as(query)
         .bind(&instance_ids)
         .fetch_all(&mut *txn)
         .await
