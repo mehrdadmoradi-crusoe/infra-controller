@@ -21,7 +21,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 pub use iface::{
-    Filter, GetPartitionOptions, IBFabric, IBFabricConfig, IBFabricManager, IBFabricVersions,
+    Filter, GetPartitionOptions, IBFabric, IBFabricConfig, IBFabricManager, IBFabricRawResponse,
+    IBFabricVersions,
 };
 pub use model::ib::{IBMtu, IBRateLimit, IBServiceLevel};
 
@@ -33,6 +34,8 @@ mod iface;
 mod rest;
 mod ufmclient;
 
+#[cfg(feature = "test-support")]
+pub mod fakes;
 #[cfg(feature = "test-support")]
 mod mock;
 
