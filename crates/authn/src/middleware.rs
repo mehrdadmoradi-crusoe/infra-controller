@@ -452,6 +452,45 @@ pub struct ConnectionAttributes {
     pub peer_certificates: Vec<CertificateDer<'static>>,
 }
 
+/// A client certificate on an inbound connection did not map to any
+/// principal. The rejection rate is the security signal -- a spike is a
+/// misissued certificate or a probe; the peer and the exact error ride the
+/// log line at the DEBUG level this site has always logged at.
+#[derive(carbide_instrument::Event)]
+#[event(
+    name = "carbide_authn_client_cert_rejected_total",
+    component = "authn",
+    log = debug,
+    metric = counter,
+    message = "Rejected a client certificate",
+    describe = "The amount of client certificates rejected during authentication"
+)]
+struct ClientCertRejected {
+    #[label]
+    reason: RejectReason,
+    #[context]
+    peer_address: SocketAddr,
+    #[context]
+    error: String,
+}
+
+/// Which stage of certificate-to-principal mapping rejected the certificate,
+/// mirroring [`SpiffeError`]'s variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, carbide_instrument::LabelValue)]
+enum RejectReason {
+    Validation,
+    Recognition,
+}
+
+impl From<&SpiffeError> for RejectReason {
+    fn from(error: &SpiffeError) -> Self {
+        match error {
+            SpiffeError::Validation(_) => RejectReason::Validation,
+            SpiffeError::Recognition(_) => RejectReason::Recognition,
+        }
+    }
+}
+
 impl<S, B, AZ> Service<Request<B>> for CertDescriptionService<S, AZ>
 where
     B: tonic::codegen::Body,
@@ -482,10 +521,11 @@ where
                 match Principal::try_from_client_certificate(cert, &self.authorization_context) {
                     Ok(x) => Some(x),
                     Err(e) => {
-                        tracing::debug!(
-                            "Saw bad certificate from {:?}: {e}",
-                            conn_attrs.peer_address,
-                        );
+                        carbide_instrument::emit(ClientCertRejected {
+                            reason: RejectReason::from(&e),
+                            peer_address: conn_attrs.peer_address,
+                            error: e.to_string(),
+                        });
                         None
                     }
                 }
@@ -503,5 +543,119 @@ where
 
         extensions.insert(auth_context);
         self.inner.call(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::task::{Context, Poll};
+
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+
+    use super::*;
+    use crate::spiffe_id::TrustDomain;
+    use crate::{SpiffeContextError, SpiffeValidationError};
+
+    /// A terminal service for driving the middleware. The middleware does all
+    /// of its certificate work synchronously inside `call` before delegating
+    /// here, so the test never needs to poll the returned future.
+    #[derive(Clone)]
+    struct Terminal;
+
+    impl<B> Service<Request<B>> for Terminal {
+        type Response = ();
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<(), Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: Request<B>) -> Self::Future {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    fn spiffe_context() -> SpiffeContext {
+        SpiffeContext {
+            trust_domain: TrustDomain::new("example.test").expect("trust domain"),
+            service_base_paths: vec!["/carbide-system/sa/".to_string()],
+            machine_base_path: "/carbide-system/machine/".to_string(),
+            additional_issuer_cns: HashSet::new(),
+        }
+    }
+
+    /// A certificate that maps to no principal is dropped, and the drop is
+    /// counted: one emit writes the DEBUG log line (reason, peer, error) AND
+    /// moves carbide_authn_client_cert_rejected_total.
+    #[test]
+    fn rejected_client_cert_logs_and_counts() {
+        let metrics = MetricsCapture::start();
+        let middleware = CertDescriptionMiddleware::<NoAuthorization>::new(None, spiffe_context());
+        let mut service = middleware.layer(Terminal);
+
+        let logs = capture_logs(|| {
+            let mut request = Request::builder()
+                .uri("/forge.Forge/Anything")
+                .body(String::new())
+                .expect("request");
+            request
+                .extensions_mut()
+                .insert(Arc::new(ConnectionAttributes {
+                    peer_address: "192.0.2.7:4433".parse().expect("socket address"),
+                    peer_certificates: vec![CertificateDer::from(b"not a certificate".to_vec())],
+                }));
+            let _response_future = service.call(request);
+        });
+
+        let rejection = logs
+            .iter()
+            .find(|log| log.message == "Rejected a client certificate")
+            .expect("the rejection log line");
+        assert_eq!(rejection.level, tracing::Level::DEBUG);
+        let field = |name: &str| {
+            rejection
+                .fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(field("reason"), Some("validation"));
+        assert_eq!(field("peer_address"), Some("192.0.2.7:4433"));
+        assert!(
+            field("error").is_some_and(|error| !error.is_empty()),
+            "the rejection carries the certificate error"
+        );
+
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_authn_client_cert_rejected_total",
+                &[("reason", "validation")]
+            ),
+            1.0
+        );
+    }
+
+    /// Both SpiffeError variants map onto the bounded reason label.
+    #[test]
+    fn reject_reason_maps_the_spiffe_error_variants() {
+        use carbide_instrument::LabelValue as _;
+
+        let validation =
+            SpiffeError::Validation(SpiffeValidationError::ValidationError("bad".to_string()));
+        let recognition =
+            SpiffeError::Recognition(SpiffeContextError::ContextError("unknown".to_string()));
+
+        assert_eq!(RejectReason::from(&validation), RejectReason::Validation);
+        assert_eq!(RejectReason::from(&recognition), RejectReason::Recognition);
+        assert_eq!(
+            RejectReason::Validation.label_value().as_str(),
+            "validation"
+        );
+        assert_eq!(
+            RejectReason::Recognition.label_value().as_str(),
+            "recognition"
+        );
     }
 }
