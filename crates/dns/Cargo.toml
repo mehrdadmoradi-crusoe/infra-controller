@@ -50,6 +50,7 @@ dns-record = { path = "../dns-record" }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 metrics-endpoint = { path = "../metrics-endpoint" }
+carbide-instrument = { path = "../instrument" }
 carbide-tls = { path = "../tls" }
 carbide-version = { path = "../version" }
 carbide-rpc = { path = "../rpc" }
@@ -57,6 +58,7 @@ thiserror = { workspace = true }
 lru.workspace = true
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 
 [build-dependencies]
