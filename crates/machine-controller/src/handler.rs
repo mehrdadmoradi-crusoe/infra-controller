@@ -155,6 +155,38 @@ pub const MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES: u32 = 5;
 #[cfg(test)]
 pub const MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES: u32 = 2; // Faster for tests
 
+/// How a failed host firmware upgrade proceeds against its retry budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, carbide_instrument::LabelValue)]
+enum RetryDecision {
+    Retried,
+    Exhausted,
+}
+
+/// A host firmware upgrade failed and the retry budget decided what happens
+/// next. An exhausted machine stays in `FailedFirmwareUpgrade` until an
+/// operator intervenes and re-emits this on every handler pass, so a nonzero
+/// exhausted rate marks currently-stuck machines.
+#[derive(carbide_instrument::Event)]
+#[event(
+    name = "carbide_host_reprovision_retries_total",
+    component = "machine-controller",
+    log = warn,
+    metric = counter,
+    message = "Host firmware upgrade retry decided",
+    describe = "The amount of times a failed host firmware upgrade was retried or declared \
+                exhausted during host reprovisioning"
+)]
+struct HostReprovisionRetryDecided {
+    #[label]
+    decision: RetryDecision,
+    #[context]
+    machine_id: MachineId,
+    #[context]
+    retry_count: u32,
+    #[context]
+    error: String,
+}
+
 // Compute the API-side deadline for a scout firmware upgrade from scout's
 // timeout envelope: fixed script download timeout, script execution timeout,
 // one artifact download timeout per file artifact, and report/slack time.
@@ -8287,7 +8319,11 @@ impl HostUpgradeState {
                     Ok(StateHandlerOutcome::do_nothing())
                 }
             }
-            HostReprovisionState::FailedFirmwareUpgrade { report_time, .. } => {
+            HostReprovisionState::FailedFirmwareUpgrade {
+                report_time,
+                reason,
+                ..
+            } => {
                 // A special case in Rackfirmware upgrade to handle FailedFirmwareUpgrade
                 // Accept a freshly-issued Host Reprovision request that arrives while we are
                 // sitting in FailedFirmwareUpgrade. `trigger_host_reprovisioning_request`
@@ -8324,10 +8360,14 @@ impl HostUpgradeState {
                         .site_config
                         .firmware_global
                         .host_firmware_upgrade_retry_interval;
-                let should_retry = can_retry && waited_enough;
 
-                if should_retry {
-                    tracing::info!("Retrying firmware upgrade on {}", state.host_snapshot.id);
+                if can_retry && waited_enough {
+                    carbide_instrument::emit(HostReprovisionRetryDecided {
+                        decision: RetryDecision::Retried,
+                        machine_id: *machine_id,
+                        retry_count,
+                        error: reason.clone().unwrap_or_default(),
+                    });
 
                     let reprovision_state = HostReprovisionState::CheckingFirmwareV2 {
                         firmware_type: None,
@@ -8336,8 +8376,17 @@ impl HostUpgradeState {
                     Ok(StateHandlerOutcome::transition(
                         scenario.actual_new_state(reprovision_state, retry_count + 1),
                     ))
+                } else if can_retry {
+                    // Still inside the retry interval; a later pass decides.
+                    Ok(StateHandlerOutcome::do_nothing())
                 } else {
-                    // doesn't make sense to retry anymore, remain in this failure state
+                    // No retry budget left; remain in this failure state.
+                    carbide_instrument::emit(HostReprovisionRetryDecided {
+                        decision: RetryDecision::Exhausted,
+                        machine_id: *machine_id,
+                        retry_count,
+                        error: reason.clone().unwrap_or_default(),
+                    });
                     Ok(StateHandlerOutcome::do_nothing())
                 }
             }
@@ -11901,6 +11950,7 @@ async fn get_power_state(redfish_client: &dyn Redfish) -> Result<PowerState, Sta
 mod tests {
     use std::str::FromStr;
 
+    use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use model::firmware::FirmwareComponent;
     use model::site_explorer::{
         EndpointExplorationReport, EndpointType, Inventory, PreingestionState, Service,
@@ -11908,6 +11958,52 @@ mod tests {
     use regex::Regex;
 
     use super::*;
+
+    /// One emit per retry decision: the WARN line carries the machine, retry
+    /// count, and error, and the counter moves under the matching decision
+    /// label.
+    #[test]
+    fn host_reprovision_retry_decision_logs_and_counts() {
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
+                .unwrap();
+
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            carbide_instrument::emit(HostReprovisionRetryDecided {
+                decision: RetryDecision::Retried,
+                machine_id,
+                retry_count: 1,
+                error: "scout upgrade failed".to_string(),
+            });
+            carbide_instrument::emit(HostReprovisionRetryDecided {
+                decision: RetryDecision::Exhausted,
+                machine_id,
+                retry_count: MAX_FIRMWARE_UPGRADE_RETRIES,
+                error: "scout upgrade failed".to_string(),
+            });
+        });
+
+        assert_eq!(logs.len(), 2);
+        for log in &logs {
+            assert_eq!(log.level, tracing::Level::WARN);
+            assert_eq!(log.message, "Host firmware upgrade retry decided");
+        }
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_host_reprovision_retries_total",
+                &[("decision", "retried")],
+            ),
+            1.0
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_host_reprovision_retries_total",
+                &[("decision", "exhausted")],
+            ),
+            1.0
+        );
+    }
 
     #[test]
     fn scout_firmware_upgrade_deadline_accounts_for_each_artifact() {
