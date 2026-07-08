@@ -29,6 +29,17 @@ type ManageExpectedSwitch struct {
 	siteClientPool *sc.ClientPool
 }
 
+// equalStringLists compares two string lists, treating nil and empty as
+// equal: Postgres scans an empty text[] into a non-nil empty slice while an
+// unset proto repeated field decodes as nil, and reflect.DeepEqual would
+// treat that pair as a difference on every reconciliation pass.
+func equalStringLists(a, b []string) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
+}
+
 // Activity functions
 
 // UpdateExpectedSwitchesInDB is a Temporal activity that takes a collection of ExpectedSwitch data pushed by Site Agent and updates the DB
@@ -132,6 +143,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 				SiteID:             siteID,
 				BmcMacAddress:      reported.BmcMacAddress,
 				SwitchSerialNumber: reported.SwitchSerialNumber,
+				NvosMacAddresses:   reported.NvosMacAddresses,
 				Labels:             reported.Labels,
 				CreatedBy:          siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
@@ -144,6 +156,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		// update if any field differs
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.SwitchSerialNumber != reported.SwitchSerialNumber ||
+			!equalStringLists(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
 			!reflect.DeepEqual(cur.Labels, reported.Labels) {
 			// nil labels in nico can mean we need to clear out existing labels in DB
 			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
@@ -152,10 +165,17 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			if cur.Labels != nil && labels == nil {
 				labels = map[string]string{}
 			}
+			// nil NVOS MACs from nico follow the same rule as labels: swap in an
+			// empty slice so the DAO clears a previously-set list.
+			nvosMacAddresses := reported.NvosMacAddresses
+			if cur.NvosMacAddresses != nil && nvosMacAddresses == nil {
+				nvosMacAddresses = []string{}
+			}
 			_, uerr := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
 				ExpectedSwitchID:   cur.ID,
 				BmcMacAddress:      &reported.BmcMacAddress,
 				SwitchSerialNumber: &reported.SwitchSerialNumber,
+				NvosMacAddresses:   nvosMacAddresses,
 				Labels:             labels,
 			})
 			if uerr != nil {

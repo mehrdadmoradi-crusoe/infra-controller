@@ -5,6 +5,8 @@ package model
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +17,22 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
+
+// uniqueMacAddresses is a validation.By rule that rejects duplicate entries in
+// a MAC address list. Comparison is case-insensitive since MAC addresses
+// differing only in case refer to the same interface.
+func uniqueMacAddresses(value interface{}) error {
+	macs, _ := value.([]string)
+	seen := make(map[string]bool, len(macs))
+	for _, mac := range macs {
+		key := strings.ToLower(mac)
+		if seen[key] {
+			return fmt.Errorf("duplicate MAC address: %s", mac)
+		}
+		seen[key] = true
+	}
+	return nil
+}
 
 // APIExpectedSwitchCreateRequest is the data structure to capture request to create a new ExpectedSwitch
 type APIExpectedSwitchCreateRequest struct {
@@ -32,6 +50,8 @@ type APIExpectedSwitchCreateRequest struct {
 	NvOsUsername *string `json:"nvOsUsername"`
 	// NvOsPassword is the NVOS password of the expected switch
 	NvOsPassword *string `json:"nvOsPassword"`
+	// NvosMacAddresses is the list of NVOS MAC addresses of the expected switch
+	NvosMacAddresses []string `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -71,6 +91,9 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Switch serial number consists only of whitespace"),
 			validation.Length(1, 32).Error("Switch serial number must be 32 characters or less")),
+		validation.Field(&escr.NvosMacAddresses,
+			validation.Each(validation.Required.Error(validationErrorValueRequired), validationis.MAC),
+			validation.By(uniqueMacAddresses)),
 		validation.Field(&escr.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&escr.BmcIpAddress,
@@ -114,6 +137,8 @@ type APIExpectedSwitchUpdateRequest struct {
 	NvOsUsername *string `json:"nvOsUsername"`
 	// NvOsPassword is the NVOS password of the expected switch
 	NvOsPassword *string `json:"nvOsPassword"`
+	// NvosMacAddresses is the list of NVOS MAC addresses of the expected switch
+	NvosMacAddresses []string `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -167,6 +192,9 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 			validation.When(esur.SwitchSerialNumber != nil && *esur.SwitchSerialNumber != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("Switch Serial Number consists only of whitespace")),
 			validation.Length(1, 32).Error("Switch Serial Number must be 1-32 characters")),
+		validation.Field(&esur.NvosMacAddresses,
+			validation.Each(validation.Required.Error(validationErrorValueRequired), validationis.MAC),
+			validation.By(uniqueMacAddresses)),
 		validation.Field(&esur.RackID,
 			validation.NilOrNotEmpty.Error("RackID cannot be empty")),
 		validation.Field(&esur.BmcIpAddress,
@@ -206,6 +234,8 @@ type APIExpectedSwitch struct {
 	Site *APISite `json:"site,omitempty"`
 	// SwitchSerialNumber is the serial number of the expected switch
 	SwitchSerialNumber string `json:"switchSerialNumber"`
+	// NvosMacAddresses is the list of NVOS MAC addresses of the expected switch
+	NvosMacAddresses []string `json:"nvosMacAddresses"`
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected switch
@@ -239,6 +269,7 @@ func NewAPIExpectedSwitch(dbModel *cdbm.ExpectedSwitch) *APIExpectedSwitch {
 		BmcMacAddress:      dbModel.BmcMacAddress,
 		SiteID:             dbModel.SiteID,
 		SwitchSerialNumber: dbModel.SwitchSerialNumber,
+		NvosMacAddresses:   dbModel.NvosMacAddresses,
 		RackID:             dbModel.RackID,
 		BmcIpAddress:       dbModel.BmcIpAddress,
 		Name:               dbModel.Name,
