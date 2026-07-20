@@ -26,9 +26,9 @@ setup_l3vni() {
   ip link set "vni$vni" master "br-$vrf" up
 }
 
-# vpc-blue = VNI 2024549, vpc-green = VNI 2024536 (NICo allocations)
-setup_l3vni vrf-blue 2024549
-setup_l3vni vrf-green 2024536
+# vpc-blue = VNI 2024508, vpc-green = VNI 2024520 (NICo allocations)
+setup_l3vni vrf-blue 2024508
+setup_l3vni vrf-green 2024520
 
 # Tenant instance hosted on this DPU
 if [ -n "${INSTANCE_VRF:-}" ]; then

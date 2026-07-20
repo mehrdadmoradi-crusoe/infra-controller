@@ -548,12 +548,37 @@ impl ApiClient {
     }
 
     /// Registers a mock expected switch.
+    ///
+    /// DEMO-LOCAL (not upstream — see NVIDIA/infra-controller#3430): to let a
+    /// simulated NVOS switch progress past `WaitForOsMachineInterface`, we give it
+    /// a static NVOS management IP plus dummy NVOS credentials. That makes
+    /// site-explorer pre-allocate the NVOS `machine_interface` (its static path is
+    /// gated on `nvos_ip_address` being `Some`) and lets `RotateOsPassword` seed
+    /// the `switch_nvos/<mac>/admin` Vault secret. Upstream, how a real switch's
+    /// NVOS side comes up (DHCP vs static) is a maintainer decision, so this stays
+    /// on the demo branch until that is settled.
     pub async fn add_expected_switch(
         &self,
         bmc_mac_address: String,
         switch_serial_number: String,
         nvos_mac_addresses: Vec<String>,
     ) -> ClientApiResult<()> {
+        // Site-explorer's static NVOS pre-allocation requires EXACTLY ONE nvos_mac.
+        let nvos_mac_addresses: Vec<String> = nvos_mac_addresses.into_iter().take(1).collect();
+
+        // Derive a deterministic, unique NVOS management IP in the top of the admin
+        // segment (192.168.64.0/18 -> use .127.x, above the DHCP pool). Unique per
+        // switch because it is keyed on the NVOS MAC's final octet; pre-allocation
+        // rejects a duplicate IP if two ever collided.
+        let nvos_ip_address = nvos_mac_addresses.first().map(|mac| {
+            let last_octet = mac
+                .rsplit(':')
+                .next()
+                .and_then(|b| u8::from_str_radix(b, 16).ok())
+                .unwrap_or(1);
+            format!("192.168.127.{last_octet}")
+        });
+
         self.0
             .add_expected_switch(ExpectedSwitch {
                 expected_switch_id: None,
@@ -562,10 +587,10 @@ impl ApiClient {
                 bmc_username: DUMMY_FACTORY_USERNAME.to_string(),
                 bmc_password: DUMMY_FACTORY_PASSWORD.to_string(),
                 switch_serial_number,
-                nvos_username: None,
-                nvos_password: None,
+                nvos_username: Some(DUMMY_FACTORY_USERNAME.to_string()),
+                nvos_password: Some(DUMMY_FACTORY_PASSWORD.to_string()),
                 bmc_ip_address: String::new(),
-                nvos_ip_address: None,
+                nvos_ip_address,
                 metadata: None,
                 rack_id: None,
                 bmc_retain_credentials: None,

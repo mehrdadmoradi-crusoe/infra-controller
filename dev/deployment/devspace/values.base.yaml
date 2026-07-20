@@ -107,6 +107,23 @@ nico-api:
       run_interval = "10s"
       concurrency_limit = 100
 
+      # DEMO: GB200 NVL72 rack profile (compute=2 trays, switch=2; power_shelf omitted=0).
+      # Rack gates count by rack_id FK only; name/vendor are cosmetic.
+      [rack_profiles.GB200NVL72]
+      product_family = "gb200"
+      rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+
+      [rack_profiles.GB200NVL72.rack_capabilities.compute]
+      name = "GB200"
+      count = 2
+      vendor = "NVIDIA"
+
+      [rack_profiles.GB200NVL72.rack_capabilities.switch]
+      count = 2
+
+      [rack_profiles.GB200NVL72.rack_capabilities.power_shelf]
+      count = 0
+
 nico-bmc-proxy:
   enabled: true
   replicas: 1 # save on local resources

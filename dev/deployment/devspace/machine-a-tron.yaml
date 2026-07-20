@@ -30,7 +30,7 @@ data:
 
     # machine-a-tron config generated from "just setup-k3s-env-ips"
     [machines.config]
-    host_count = 10
+    host_count = 2
     dpu_per_host_count = 2
     dpu_reboot_delay = 1 # in units of seconds
     host_reboot_delay = 1 # in units of seconds
@@ -48,6 +48,21 @@ data:
     hw_type = "nvidia_switch_nd5200_ld"
     host_count = 2
     dpu_per_host_count = 0
+    dpu_reboot_delay = 1
+    host_reboot_delay = 1
+    vpc_count = 0
+    subnets_per_vpc = 0
+    admin_dhcp_relay_address = "192.168.176.1"
+    oob_dhcp_relay_address = "192.168.192.1"
+    run_interval_working = "1s"
+    run_interval_idle = "10s"
+    template_dir = "/opt/machine-a-tron/templates"
+
+    # GB200 NVL72 compute trays (Wiwynn, HCL-tested path) — DEMO (minimal count).
+    [machines.gb200-trays]
+    hw_type = "wiwynn_gb200_nvl"
+    host_count = 2
+    dpu_per_host_count = 2
     dpu_reboot_delay = 1
     host_reboot_delay = 1
     vpc_count = 0

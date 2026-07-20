@@ -4,8 +4,29 @@ Open this file in VS Code with the **Runme** extension installed (search
 "Runme" by Stateful in Extensions). Every block below gets a ▶ button;
 output appears inline. Blocks are ordered — run top to bottom the first time.
 
-All commands verified working on this machine (2026-07-02). Paths are
-relative to this file's directory (`~/infra-controller/demo/`).
+All commands verified working on this machine (§1–§7 on 2026-07-02; §8 rack
+lifecycle re-verified 2026-07-20). Paths are relative to this file's directory
+(`~/infra-controller/demo/`).
+
+---
+
+## Coverage — what this proves, mapped to the deck
+
+| Deck claim ("What we've validated") | Section | Live now |
+|---|---|---|
+| Zero-touch fleet bringup | §2 Inventory | yes |
+| Tenant provisioning via API (CreateVpc) | §3 Tenant gRPC API | yes |
+| Isolation & peering | §3 (pb-peer/unpeer), §6 | yes |
+| Cloud interconnect | §6b | yes |
+| Failure recovery | §7 | yes |
+| Supercluster rack lifecycle | §8 Rack lifecycle | yes |
+| Node / instance lifecycle | §9 (API surface; seed to demo) | partial |
+| Tenant control plane — REST + Keycloak/JWT | §10 tenant-api-tour.sh | needs REST stack up |
+
+Deliberately **not** in this playbook — not demonstrable without real hardware (the
+deck's "What is not yet proven" slide says so): secure reclaim/sanitize timing on
+real disks + firmware, NVLink partitioning (delegated to NVIDIA's NMX-C/RMS), and
+on-hardware BMC/Redfish/PXE/DOCA.
 
 ---
 
@@ -229,6 +250,87 @@ docker start dpu-hbn-01
 echo "waiting 12s for BGP to reconverge..."
 sleep 12
 docker exec tor-leaf-01 vtysh -c 'show bgp summary'
+```
+
+## 8. Supercluster rack lifecycle (Demo 2)
+
+The GB200 NVL72 rack is a first-class API object — the same control plane, one
+level up from the node. Verified live 2026-07-20.
+
+The declared rack profile (what the site expects) and the rack object NICo formed:
+
+```sh {"name":"expected-rack"}
+./nico-cli.sh expected-rack show
+```
+
+```sh {"name":"rack-list"}
+./nico-cli.sh rack list
+```
+
+The rack enumerates its own hardware — 2 GB200 compute trays + 2 NVLink (NVOS)
+switches — and reports state (Discovering). No console, no BMC:
+
+```sh {"name":"rack-show"}
+RID=$(./nico-cli.sh rack list 2>/dev/null | grep -v IGNORING \
+  | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+./nico-cli.sh rack show "$RID"
+```
+
+The GB200 trays converge to READY zero-touch, same as any node:
+
+```sh {"name":"gb200-trays-ready"}
+./nico-cli.sh machine show 2>/dev/null | grep -v IGNORING | grep -iE 'NVIDIA' | head
+```
+
+The one step this sim does **not** run: NVLink fabric bring-up delegates to
+NVIDIA's NMX-C/RMS (a real service, needs the NVL72 stack). The mapping table it
+would populate is present but empty here — the honest handoff boundary:
+
+```sh {"name":"nmxc-endpoints"}
+./nico-cli.sh nvlink-nmxc-endpoints show
+```
+
+## 9. Node / instance lifecycle (API surface)
+
+The tenant node loop — allocate → operate → reclaim — is exposed by the
+`instance` / `instance-type` verbs. Nothing is allocated in this sim (empty
+tables), so these show the surface; seed an instance-type + instance to demo the
+full loop live.
+
+```sh {"name":"instance-verbs"}
+./nico-cli.sh instance --help 2>/dev/null | grep -v IGNORING | sed -n '/Commands:/,/^Options:/p'
+```
+
+```sh {"name":"instance-types"}
+./nico-cli.sh instance-type show
+```
+
+```sh {"name":"instances"}
+./nico-cli.sh instance show
+```
+
+Power/boot as API verbs (the mediated-BMC claim) live under `boot-override` and
+`bmc-machine` — operator-mediated, never raw host BMC:
+
+```sh {"name":"boot-verbs"}
+./nico-cli.sh boot-override --help 2>/dev/null | grep -v IGNORING | sed -n '/Commands:/,/^Options:/p' | head
+```
+
+## 10. Tenant REST API + Keycloak (JWT) — requires the REST stack
+
+The tenant-facing REST API (org-scoped `/v2/org/{org}/nico/{resource}`, Keycloak
+JWT, TENANT_ADMIN) runs on a separate kind cluster `nico-rest-local`
+(Keycloak :8082, API :8388). It is **not** running by default — bring it up first
+(see `REST-STACK-DEPLOYMENT.md`). Then:
+
+```sh {"name":"tenant-api-tour"}
+./tenant-api-tour.sh            # ~60-op catalog + a live authenticated probe
+```
+
+The catalog alone needs no stack:
+
+```sh {"name":"tenant-api-catalog-only"}
+./tenant-api-tour.sh --catalog
 ```
 
 ---

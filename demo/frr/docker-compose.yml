@@ -6,8 +6,8 @@
 #                                                                         tor-leaf-01 AS65100
 #   dpu-hbn-02 AS65202 VTEP 10.180.62.2  vpc-green instance 10.20.20.1/24/   (underlay + EVPN transit)
 #
-# Each DPU carries BOTH per-VPC VRFs with L3VNIs (vpc-blue VNI 2024549,
-# vpc-green VNI 2024536 — the VNIs NICo allocated). Tenant routes travel as
+# Each DPU carries BOTH per-VPC VRFs with L3VNIs (vpc-blue VNI 2024508,
+# vpc-green VNI 2024520 — the VNIs NICo allocated). Tenant routes travel as
 # EVPN type-5 over VXLAN. VPCs are isolated by default;
 # ./vpc-peering-create.sh leaks routes between the VRFs on every DPU,
 # exactly what forge-dpu-agent does on VpcPeering create.
