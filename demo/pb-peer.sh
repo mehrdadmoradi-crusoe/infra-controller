@@ -10,7 +10,9 @@ cd "$(dirname -- "${BASH_SOURCE[0]}")"
 vpcs=$(./nico-cli.sh -f json vpc show 2>/dev/null | grep -v IGNORING)
 BLUE=$(echo "$vpcs"  | jq -r '.vpcs[] | select(.metadata.name=="vpc-blue") | .id')
 GREEN=$(echo "$vpcs" | jq -r '.vpcs[] | select(.metadata.name=="vpc-green") | .id')
-[ -z "$BLUE" ] || [ -z "$GREEN" ] && { echo "vpc-blue/vpc-green not found in NICo"; exit 1; }
+if [ -z "$BLUE" ] || [ -z "$GREEN" ]; then
+  echo "vpc-blue/vpc-green not found in NICo — run ./pb-seed.sh first"; exit 1
+fi
 
 echo "==== 1. CONTROL PLANE: VpcPeering object in NICo ===="
 existing=$(./nico-cli.sh -f json vpc-peering show 2>/dev/null | grep -v IGNORING \
@@ -25,7 +27,14 @@ fi
 echo
 echo "==== 2. DATA PLANE: applying VRF leaking on the DPUs (as forge-dpu-agent) ===="
 frr/vpc-peering-create.sh
-sleep 3
+# wait for the cross-VPC route to actually leak in (EVPN type-5 + import vrf),
+# rather than a fixed sleep — the fabric converges in a few seconds
+echo -n "   waiting for vpc-blue's route to leak into vrf-green"
+for t in $(seq 1 12); do
+  sleep 2; echo -n "."
+  docker exec dpu-hbn-02 vtysh -c 'show ip route vrf vrf-green' 2>/dev/null \
+    | grep -q '10.10.10.0/24' && { echo " leaked (~$((t*2))s)"; break; }
+done
 
 echo
 echo "==== 3. PROOF: leaked cross-VRF route on dpu-hbn-02 ===="

@@ -26,9 +26,13 @@ setup_l3vni() {
   ip link set "vni$vni" master "br-$vrf" up
 }
 
-# vpc-blue = VNI 2024508, vpc-green = VNI 2024520 (NICo allocations)
-setup_l3vni vrf-blue 2024508
-setup_l3vni vrf-green 2024520
+# L3VNIs = the VPCs' NICo-allocated VNIs. pb-seed.sh writes them to the mounted
+# vpc-vnis.env; we source it here so a plain `docker restart` (no recreate)
+# picks up new VNIs — recreate triggers FRR's type-5 origination race, a warm
+# restart does not. Falls back to demo defaults if the seed hasn't run.
+[ -f /etc/frr/vpc-vnis.env ] && . /etc/frr/vpc-vnis.env
+setup_l3vni vrf-blue  "${VPC_BLUE_VNI:-2024508}"
+setup_l3vni vrf-green "${VPC_GREEN_VNI:-2024520}"
 
 # Tenant instance hosted on this DPU
 if [ -n "${INSTANCE_VRF:-}" ]; then
