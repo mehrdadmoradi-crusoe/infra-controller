@@ -55,4 +55,14 @@ if [ -n "${INTERCONNECT_IP:-}" ] && [ -n "${INTERCONNECT_VRF:-}" ]; then
   fi
 fi
 
+# VXLAN checksum/segmentation offload does NOT survive a colima VM reboot on
+# virtio NICs: packets get encapsulated + emitted but silently dropped in
+# transit (bare IP still works). Disable offload on every ethN so the fabric
+# forwards, on EVERY container start — robust to colima/container restarts.
+# SIM-ONLY: real BlueField DPUs keep hardware offload; never do this there.
+command -v ethtool >/dev/null 2>&1 || apk add --no-cache ethtool >/dev/null 2>&1 || true
+for _if in $(ls /sys/class/net | grep -E '^eth'); do
+  ethtool -K "$_if" tx off rx off tso off gso off gro off >/dev/null 2>&1 || true
+done
+
 exec /usr/lib/frr/docker-start

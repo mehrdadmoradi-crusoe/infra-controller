@@ -80,6 +80,20 @@ echo "==== 4. bring up fabric + warm-restart to apply VNIs ===="
 # are volume-mounted rather than passed via env_file.
 echo "   warm-restarting fabric nodes to apply VNIs..."
 docker restart tor-leaf-01 dpu-hbn-01 dpu-hbn-02 >/dev/null
+sleep 4
+# Disable NIC offload on every fabric container. VXLAN checksum/segmentation
+# offload does NOT survive a colima VM reboot — packets get encapsulated and
+# emitted but silently dropped in transit (bare IP still works, so it looks
+# baffling). Turning offload off restores forwarding and, done here, makes the
+# demo robust to colima restarts. Must run after each (re)start — a restart
+# recreates the veth with offload back ON.
+echo "   disabling NIC offload on fabric (survives colima restarts)..."
+for c in tor-leaf-01 dpu-hbn-01 dpu-hbn-02 gcp-router; do
+  docker exec "$c" sh -c 'command -v ethtool >/dev/null || apk add --no-cache ethtool >/dev/null 2>&1 || true
+    for i in $(ls /sys/class/net | grep -E "^eth"); do
+      ethtool -K "$i" tx off rx off tso off gso off gro off >/dev/null 2>&1 || true
+    done' 2>/dev/null || true
+done
 # Poll for the actual ready condition (deterministic, not a blind sleep): both
 # DPUs must originate their instance-subnet EVPN type-5 route.
 echo -n "   waiting for type-5 origination on both DPUs"
