@@ -65,4 +65,15 @@ for _if in $(ls /sys/class/net | grep -E '^eth'); do
   ethtool -K "$_if" tx off rx off tso off gso off gro off >/dev/null 2>&1 || true
 done
 
+# EVPN symmetric-IRB with cross-VRF route-leaking (VPC peering / interconnect)
+# is an asymmetric-forwarding-path design: the reply for a leaked route can
+# arrive via a different VRF than the request left by. Reverse-path filtering
+# (rp_filter) then silently drops the return traffic. Disable it fabric-wide,
+# on every container start. Real HBN/Cumulus ships rp_filter off for the same
+# reason; this is correct config, not a sim hack.
+sysctl -qw net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 2>/dev/null || true
+for _if in $(ls /sys/class/net); do
+  sysctl -qw "net.ipv4.conf.$_if.rp_filter=0" 2>/dev/null || true
+done
+
 exec /usr/lib/frr/docker-start

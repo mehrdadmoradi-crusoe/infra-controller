@@ -94,6 +94,29 @@ for c in tor-leaf-01 dpu-hbn-01 dpu-hbn-02 gcp-router; do
       ethtool -K "$i" tx off rx off tso off gso off gro off >/dev/null 2>&1 || true
     done' 2>/dev/null || true
 done
+
+# Import each VPC's L3VNI route-target from EVERY fabric ASN (border leaf 65100
+# + both DPUs 65201/65202). NICo gives each leaf/DPU its own local AS, so the
+# auto-derived RT (<as>:<vni>) is node-specific: a type-5 re-originated by the
+# border leaf (cloud interconnect) or by the peer DPU (VPC peering) then arrives
+# in the EVPN table but never installs into the tenant VRF. Importing all ASNs
+# for the VRF's OWN VNI closes that — and only its own VNI, so isolation holds
+# (cross-VPC leaking still requires the explicit import-vrf in pb-peer.sh).
+echo "   importing L3VNI route-targets (all fabric ASNs) on DPUs..."
+rt_import() {  # $1=container  $2=local-AS
+  docker exec "$1" vtysh \
+    -c 'configure terminal' \
+    -c "router bgp $2 vrf vrf-blue"  -c ' address-family l2vpn evpn' \
+    -c "  route-target import 65100:$BLUE_VNI" \
+    -c "  route-target import 65201:$BLUE_VNI" \
+    -c "  route-target import 65202:$BLUE_VNI" -c ' exit-address-family' -c 'exit' \
+    -c "router bgp $2 vrf vrf-green" -c ' address-family l2vpn evpn' \
+    -c "  route-target import 65100:$GREEN_VNI" \
+    -c "  route-target import 65201:$GREEN_VNI" \
+    -c "  route-target import 65202:$GREEN_VNI" -c 'end' >/dev/null 2>&1 || true
+}
+rt_import dpu-hbn-01 65201
+rt_import dpu-hbn-02 65202
 # Poll for the actual ready condition (deterministic, not a blind sleep): both
 # DPUs must originate their instance-subnet EVPN type-5 route.
 echo -n "   waiting for type-5 origination on both DPUs"

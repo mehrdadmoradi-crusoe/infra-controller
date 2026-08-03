@@ -13,4 +13,11 @@ for _if in $(ls /sys/class/net | grep -E '^eth'); do
   ethtool -K "$_if" tx off rx off tso off gso off gro off >/dev/null 2>&1 || true
 done
 
+# Disable reverse-path filtering (see init-evpn.sh) — the interconnect return
+# path is asymmetric across the customer VRF; rp_filter would drop replies.
+sysctl -qw net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 2>/dev/null || true
+for _if in $(ls /sys/class/net); do
+  sysctl -qw "net.ipv4.conf.$_if.rp_filter=0" 2>/dev/null || true
+done
+
 exec /usr/lib/frr/docker-start
