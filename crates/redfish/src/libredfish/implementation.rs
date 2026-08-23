@@ -31,6 +31,10 @@ pub struct RedfishClientPoolImpl {
     pool: libredfish::RedfishClientPool,
     credential_reader: Arc<dyn CredentialReader>,
     proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
+    /// Per-target overrides of `proxy_address`, keyed by the target's own IP (when `host` parses
+    /// as one). See `NvRedfishClientPool`'s identical field in crates/redfish/src/nv_redfish for
+    /// the full rationale — kept in sync with that implementation.
+    proxy_overrides: Arc<ArcSwap<std::collections::HashMap<std::net::IpAddr, HostPortPair>>>,
 }
 
 impl RedfishClientPoolImpl {
@@ -38,11 +42,13 @@ impl RedfishClientPoolImpl {
         credential_reader: Arc<dyn CredentialReader>,
         pool: libredfish::RedfishClientPool,
         proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
+        proxy_overrides: Arc<ArcSwap<std::collections::HashMap<std::net::IpAddr, HostPortPair>>>,
     ) -> Self {
         RedfishClientPoolImpl {
             credential_reader,
             pool,
             proxy_address,
+            proxy_overrides,
         }
     }
 }
@@ -60,8 +66,16 @@ impl RedfishClientPool for RedfishClientPoolImpl {
 
         // Allow globally overriding the bmc port via site-config. We read this on every call to
         // create_client, because self.proxy_address is a dynamic setting.
+        //
+        // A per-target override (keyed by this target's own IP) wins over the process-wide
+        // proxy_address when both exist for this host, same precedence as NvRedfishClientPool.
+        let per_target_override = host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .and_then(|ip| self.proxy_overrides.load().get(&ip).cloned());
         let proxy_address = self.proxy_address.load();
-        let (host, port, add_custom_header) = match proxy_address.as_ref() {
+        let effective_override = per_target_override.or_else(|| proxy_address.as_ref().clone());
+        let (host, port, add_custom_header) = match effective_override.as_ref() {
             // No override
             None => (host, port, false),
             // Override the host and port

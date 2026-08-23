@@ -159,6 +159,52 @@ pub(crate) fn set_dynamic_config(
             }
             tracing::info!("site-explorer create_machines updated to '{}'", req.value);
         }
+        rpc::ConfigSetting::BmcProxyOverride => {
+            // Reuses the bmc_proxy gate: this is the same class of setting (where real BMC
+            // traffic for a target actually goes), just scoped to one target instead of every
+            // target, so it should not be any less protected than bmc_proxy itself.
+            let Some(true) = api.runtime_config.site_explorer.allow_changing_bmc_proxy else {
+                return Err(CarbideError::PermissionDeniedError(
+                    "site-explorer.bmc_proxy is not allowed to be changed on this server".into(),
+                )
+                .into());
+            };
+
+            let (target, proxy_str) = req.value.split_once('=').ok_or_else(|| {
+                CarbideError::InvalidArgument(format!(
+                    "Invalid bmc_proxy_override string '{}': expected '<target_bmc_ip>=<host_port_pair>' \
+                     (empty right-hand side removes the override for that target)",
+                    req.value
+                ))
+            })?;
+
+            let target_ip = target.parse::<std::net::IpAddr>().map_err(|err| {
+                CarbideError::InvalidArgument(format!(
+                    "Invalid target BMC IP '{target}' in bmc_proxy_override: {err}"
+                ))
+            })?;
+
+            let current = api.dynamic_settings.bmc_proxy_overrides.load();
+            let mut updated = (**current).clone();
+
+            if proxy_str.is_empty() {
+                updated.remove(&target_ip);
+            } else {
+                let host_port_pair = proxy_str.parse::<HostPortPair>().map_err(|err| {
+                    CarbideError::InvalidArgument(format!(
+                        "Invalid bmc_proxy_override proxy value '{proxy_str}': {err}"
+                    ))
+                })?;
+                updated.insert(target_ip, host_port_pair);
+            }
+
+            api.dynamic_settings
+                .bmc_proxy_overrides
+                .store(Arc::new(updated));
+            tracing::info!(
+                "site-explorer bmc_proxy_override for {target_ip} updated to '{proxy_str}'"
+            );
+        }
         rpc::ConfigSetting::TracingEnabled => {
             if !api.runtime_config.tracing.allow_runtime_changes {
                 return Err(CarbideError::PermissionDeniedError(

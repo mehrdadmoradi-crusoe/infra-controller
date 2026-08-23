@@ -179,6 +179,7 @@ pub async fn run(
         site_explorer_enabled: carbide_config.site_explorer.enabled.clone(),
         create_machines: carbide_config.site_explorer.create_machines.clone(),
         bmc_proxy: carbide_config.site_explorer.bmc_proxy.clone(),
+        bmc_proxy_overrides: carbide_config.site_explorer.bmc_proxy_overrides.clone(),
         tracing_enabled: tconf.tracing_enabled,
         log_stream: tconf.log_stream,
     };
@@ -406,11 +407,14 @@ pub async fn run(
             credential_manager.clone(),
             rf_pool,
             carbide_config.site_explorer.bmc_proxy.clone(),
+            carbide_config.site_explorer.bmc_proxy_overrides.clone(),
         )
     };
 
-    let nv_redfish_pool =
-        carbide_redfish::nv_redfish::new_pool(carbide_config.site_explorer.bmc_proxy.clone());
+    let nv_redfish_pool = carbide_redfish::nv_redfish::new_pool(
+        carbide_config.site_explorer.bmc_proxy.clone(),
+        carbide_config.site_explorer.bmc_proxy_overrides.clone(),
+    );
 
     setup::start_api(
         &mut join_set,

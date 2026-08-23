@@ -210,7 +210,9 @@ impl TestApiBuilder {
             .unwrap_or_else(|| ib_fabric_test_manager(&runtime_config, credential_manager.clone()));
 
         let bmc_proxy = Arc::new(ArcSwap::new(None.into()));
-        let nv_redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
+        let bmc_proxy_overrides = Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())));
+        let nv_redfish_pool =
+            carbide_redfish::nv_redfish::new_pool(bmc_proxy, bmc_proxy_overrides);
         let bmc_session_store: Arc<dyn crate::credentials::BmcSessionStore> = Arc::new(
             crate::credentials::PgBmcSessionStore::new(self.db_pool.clone()),
         );

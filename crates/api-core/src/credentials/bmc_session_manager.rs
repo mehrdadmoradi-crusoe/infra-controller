@@ -702,7 +702,8 @@ mod tests {
         allow_basic_auth_fallback: bool,
     ) -> (Arc<BmcSessionManager>, Arc<InMemoryBmcSessionStore>) {
         let bmc_proxy = Arc::new(ArcSwap::new(Arc::new(None)));
-        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
+        let bmc_proxy_overrides = Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())));
+        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy, bmc_proxy_overrides);
         let credential_manager =
             Arc::new(TestCredentialManager::new(Credentials::UsernamePassword {
                 username: "root".to_string(),
@@ -795,7 +796,8 @@ mod tests {
     #[tokio::test]
     async fn rotate_returns_missing_credentials_when_unset() {
         let bmc_proxy = Arc::new(ArcSwap::new(Arc::new(None)));
-        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
+        let bmc_proxy_overrides = Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())));
+        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy, bmc_proxy_overrides);
         let credential_manager = Arc::new(TestCredentialManager::default());
         let store = InMemoryBmcSessionStore::new();
         let manager = BmcSessionManager::new(
@@ -987,7 +989,8 @@ mod tests {
     #[tokio::test]
     async fn rotate_serializes_per_mac_even_across_distinct_spiffe_callers() {
         let bmc_proxy = Arc::new(ArcSwap::new(Arc::new(None)));
-        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
+        let bmc_proxy_overrides = Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())));
+        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy, bmc_proxy_overrides);
         let credential_manager = CountingCredentialManager::new(
             Credentials::UsernamePassword {
                 username: "root".to_string(),
@@ -1172,7 +1175,8 @@ mod tests {
     #[tokio::test]
     async fn issue_credentials_with_flag_off_surfaces_no_session_service_error() {
         let bmc_proxy = Arc::new(ArcSwap::new(Arc::new(None)));
-        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy);
+        let bmc_proxy_overrides = Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())));
+        let redfish_pool = carbide_redfish::nv_redfish::new_pool(bmc_proxy, bmc_proxy_overrides);
         let credential_manager = Arc::new(TestCredentialManager::default());
         let store = InMemoryBmcSessionStore::new();
         let manager = BmcSessionManager::new(

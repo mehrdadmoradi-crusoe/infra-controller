@@ -41,11 +41,13 @@ pub fn new_pool(
     credential_reader: Arc<dyn CredentialReader>,
     pool: libredfish::RedfishClientPool,
     proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
+    proxy_overrides: Arc<ArcSwap<std::collections::HashMap<std::net::IpAddr, HostPortPair>>>,
 ) -> Arc<dyn RedfishClientPool> {
     Arc::new(implementation::RedfishClientPoolImpl::new(
         credential_reader,
         pool,
         proxy_address,
+        proxy_overrides,
     ))
 }
 

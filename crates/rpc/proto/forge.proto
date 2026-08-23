@@ -5569,6 +5569,12 @@ message MaintenanceRequest {
 
 message SetDynamicConfigRequest {
   ConfigSetting setting = 1;
+  // For BMC_PROXY_OVERRIDE: "<target_bmc_ip>=<host_port_pair>" to upsert an
+  // override for that one target, or "<target_bmc_ip>=" (empty right-hand
+  // side) to remove it. Unlike BMC_PROXY (one process-wide override applied
+  // to every target), this lets a single instance proxy a specific real BMC
+  // through a tunnel/bridge while everything else keeps using BMC_PROXY (or
+  // no override at all) unchanged.
   string value = 2;
   optional string expiry = 3;
 }
@@ -5579,6 +5585,7 @@ enum ConfigSetting {
   BMC_PROXY = 2;
   TRACING_ENABLED = 3;
   SITE_EXPLORER_ENABLED = 4;
+  BMC_PROXY_OVERRIDE = 5;
 }
 
 message FindIpAddressRequest {

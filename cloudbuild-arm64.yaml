@@ -1,0 +1,19 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['run', '--rm', '--privileged', 'tonistiigi/binfmt', '--install', 'arm64']
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--platform=linux/arm64'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/cmbm-prototype/nico/nico-api:bmcproxyoverride-arm64'
+      - '.'
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/cmbm-prototype/nico/nico-api:bmcproxyoverride-arm64'
+images:
+  - 'us-central1-docker.pkg.dev/cmbm-prototype/nico/nico-api:bmcproxyoverride-arm64'
+timeout: 5400s
+options:
+  machineType: 'E2_HIGHCPU_32'

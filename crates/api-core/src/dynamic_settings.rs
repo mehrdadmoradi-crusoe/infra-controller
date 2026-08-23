@@ -40,6 +40,11 @@ pub struct DynamicSettings {
     /// Use a proxy for talking to BMC's
     pub bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
 
+    /// Per-target overrides of `bmc_proxy`, keyed by the target BMC's own IP. See
+    /// `SiteExplorerConfig::bmc_proxy_overrides` for the full rationale.
+    pub bmc_proxy_overrides:
+        Arc<ArcSwap<std::collections::HashMap<std::net::IpAddr, HostPortPair>>>,
+
     /// Whether log tracing should be enabled
     pub tracing_enabled: Arc<AtomicBool>,
 

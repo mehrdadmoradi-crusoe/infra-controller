@@ -113,6 +113,16 @@ pub struct SiteExplorerConfig {
     )]
     pub bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
 
+    /// Per-target overrides of `bmc_proxy`, keyed by the target BMC's own IP. A hit here is used
+    /// instead of `bmc_proxy` for that one IP; every other target keeps using `bmc_proxy` (or no
+    /// proxy) as before. This lets one NICo instance reach one specific real BMC through a
+    /// tunnel/bridge while a simulated fleet (or `bmc_proxy` itself) keeps working unchanged, so
+    /// a real node doesn't require its own dedicated NICo instance just to be proxied.
+    /// Runtime-only: set via `SetDynamicConfig`/`BMC_PROXY_OVERRIDE`, not loadable from static
+    /// config, and not persisted across a restart.
+    #[serde(skip, default = "bmc_proxy_overrides_default")]
+    pub bmc_proxy_overrides: Arc<ArcSwap<std::collections::HashMap<std::net::IpAddr, HostPortPair>>>,
+
     /// If set to `true`, the server will allow changes to the `bmc_proxy` setting at runtime.
     /// Defaults to true if the server is launched with `bmc_proxy` set, false otherwise.
     /// If explicitly set to true or false, that value is respected for the lifetime of the process.
@@ -209,6 +219,7 @@ impl Default for SiteExplorerConfig {
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: bmc_proxy(None),
+            bmc_proxy_overrides: bmc_proxy_overrides_default(),
             allow_changing_bmc_proxy: None,
             reset_rate_limit: Self::default_reset_rate_limit(),
             admin_segment_type_non_dpu: Self::default_admin_segment_type_non_dpu(),
@@ -302,6 +313,13 @@ impl SiteExplorerConfig {
 
 pub fn bmc_proxy(s: Option<HostPortPair>) -> Arc<ArcSwap<Option<HostPortPair>>> {
     Arc::new(ArcSwap::new(Arc::new(s)))
+}
+
+/// Default (empty) `bmc_proxy_overrides` map. A serde `default` fn since the field is
+/// `#[serde(skip)]` — runtime-only, never loaded from static config.
+pub fn bmc_proxy_overrides_default()
+-> Arc<ArcSwap<std::collections::HashMap<std::net::IpAddr, HostPortPair>>> {
+    Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())))
 }
 
 /// Selects the Redfish client backend used by SiteExplorer

@@ -1479,7 +1479,8 @@ mod tests {
 
     fn build_redfish_client(sim: Arc<RedfishSim>) -> RedfishClient {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
-        let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address));
+        let proxy_overrides = Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())));
+        let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address, proxy_overrides));
         RedfishClient::new(sim, nv_pool)
     }
 

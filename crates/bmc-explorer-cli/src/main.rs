@@ -83,12 +83,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .danger_accept_invalid_certs()
         .build()?;
     let proxy_address = Arc::new(ArcSwap::new(None.into()));
+    let proxy_overrides = Arc::new(ArcSwap::new(Arc::new(std::collections::HashMap::new())));
     let credential_provider = Arc::new(TestCredentialManager::new(fallback_credentials.clone()));
 
     let redfish_client_pool = carbide_redfish::libredfish::new_pool(
         credential_provider.clone(),
         rf_pool,
         proxy_address.clone(),
+        proxy_overrides.clone(),
     );
     let mode = match args.mode.as_str() {
         "libredfish" => SiteExplorerExploreMode::LibRedfish,
@@ -105,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let explorer = BmcEndpointExplorer::new(
         redfish_client_pool,
-        Arc::new(NvRedfishClientPool::new(proxy_address)),
+        Arc::new(NvRedfishClientPool::new(proxy_address, proxy_overrides)),
         carbide_ipmi::test_support(),
         credential_provider.clone(),
         rotate_switch_nvos_credentials,
