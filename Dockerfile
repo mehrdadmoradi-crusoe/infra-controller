@@ -62,7 +62,7 @@ COPY . .
 
 RUN --mount=type=cache,id=nico-native-cargo-home,target=/cargo-home,sharing=locked \
   --mount=type=cache,id=nico-native-cargo-target,target=/cargo-target,sharing=locked \
-  cargo build -p carbide-api -p nico-admin-cli --locked && \
+  cargo build -p carbide-api -p nico-admin-cli && \
   mkdir -p /artifacts && \
   cp /cargo-target/debug/carbide-api /cargo-target/debug/nico-admin-cli /artifacts/
 

@@ -171,10 +171,33 @@ pub(super) async fn advance_bios_config_job(
                     mh_snapshot.host_snapshot.id
                 ))
             })?;
-            let job_state = redfish_client
-                .get_job_state(job_id)
-                .await
-                .map_err(|e| redfish_error("get_job_state", e))?;
+            let job_state = match redfish_client.get_job_state(job_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    // Some vendors (e.g. Supermicro/AST2600) don't retain a
+                    // queryable Task/Job resource for a BIOS attribute write -
+                    // the write itself still lands in the pending settings
+                    // (Bios/SD) and applies on next reboot, there's just
+                    // nothing here to poll. Proceed straight to the reboot
+                    // step rather than blocking forever on a job that will
+                    // never resolve. Unlike WaitForBiosJobCompletion's
+                    // failure path below, a missing job here is not evidence
+                    // the BIOS write itself failed - the write already
+                    // succeeded by the time this state runs.
+                    tracing::warn!(
+                        %job_id,
+                        error = %e,
+                        "BIOS job lookup failed while waiting for it to be scheduled; \
+                         assuming this vendor doesn't retain a queryable job and \
+                         proceeding to reboot"
+                    );
+                    return Ok(BiosConfigJobAdvanceOutcome::Continue(BiosConfigInfo {
+                        bios_job_id: info.bios_job_id,
+                        bios_config_state: BiosConfigState::RebootHost,
+                        retry_count: info.retry_count,
+                    }));
+                }
+            };
             if job_state.is_error_state() {
                 let failure = format!("BIOS job {} failed with state {job_state:#?}", job_id);
                 tracing::warn!(

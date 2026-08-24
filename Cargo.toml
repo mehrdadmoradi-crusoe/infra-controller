@@ -27,6 +27,12 @@ authors = ["NVIDIA Carbide Engineering <carbide-dev@exchange.nvidia.com>"]
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.44.18" }
+
+# Local patch: tolerate a missing SecurityDeviceSupport BIOS attribute on
+# Supermicro platforms that expose TPM control under a different name
+# (TPMSecurityPolicy), instead of hard-failing machine_setup. Upstream ask
+# tracked separately; this is a build-local override for testing against the
+# real S2A tray. See vendor/libredfish-patched/src/supermicro.rs.
 librms = { git = "https://github.com/NVIDIA/nv-rms-client.git", tag = "v0.9.0-mts-rc04" }
 ansi-to-html = "0.2.2"
 
@@ -272,3 +278,6 @@ cloned_instead_of_copied = "warn"
 redundant_clone = "warn"
 large_stack_arrays = "warn"
 unused_async = "warn"
+
+[patch."https://github.com/NVIDIA/libredfish.git"]
+libredfish = { path = "vendor/libredfish-patched" }
