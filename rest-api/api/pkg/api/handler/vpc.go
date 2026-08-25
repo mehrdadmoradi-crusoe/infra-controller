@@ -378,7 +378,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "vpc-create-" + vpc.ID.String(),
-			TaskQueue:                queue.SiteAgentTaskQueue(vpc.SiteID.String()),
+			TaskQueue:                queue.SiteTaskQueue,
 			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
 		}
 
@@ -803,7 +803,7 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "vpc-update-" + vpc.ID.String(),
-			TaskQueue:                queue.SiteAgentTaskQueue(vpc.SiteID.String()),
+			TaskQueue:                queue.SiteTaskQueue,
 			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
 		}
 
@@ -1073,7 +1073,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "vpc-update-virtualzation-" + uv.ID.String(),
-			TaskQueue:                queue.SiteAgentTaskQueue(vpc.SiteID.String()),
+			TaskQueue:                queue.SiteTaskQueue,
 			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
 		}
 
@@ -1744,7 +1744,7 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "vpc-delete-" + vpc.ID.String(),
-			TaskQueue:                queue.SiteAgentTaskQueue(vpc.SiteID.String()),
+			TaskQueue:                queue.SiteTaskQueue,
 			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
 		}
 
