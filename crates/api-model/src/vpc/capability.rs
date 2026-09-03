@@ -109,6 +109,13 @@ pub enum DataPlaneKind {
     /// exposes optional metadata (e.g. the VNI) for SDN integrations
     /// to consume. Example: Flat.
     OperatorManaged,
+
+    /// NICo-declared, fabric-controller-enforced VRF on the ToR/leaf switch.
+    /// The host attaches via its NIC (no DPU overlay); NICo owns the VRF/VPC
+    /// intent and hands it to an external K8s-native fabric controller
+    /// (Hedgehog/EDA) which programs the switch. NICo advertises the VNI so
+    /// the fabric can build the switch-side VTEP. Example: TorVrf.
+    FabricManaged,
 }
 
 impl DataPlaneKind {
@@ -116,7 +123,7 @@ impl DataPlaneKind {
     pub const fn fabric_interface_type(self) -> FabricInterfaceType {
         match self {
             Self::DpuOverlayL2 | Self::DpuOverlayL3 => FabricInterfaceType::Dpu,
-            Self::OperatorManaged => FabricInterfaceType::Nic,
+            Self::OperatorManaged | Self::FabricManaged => FabricInterfaceType::Nic,
         }
     }
 
@@ -161,7 +168,7 @@ impl DataPlaneKind {
     /// SDN may use it for switch-side VTEPs/ACLs/etc.). L2-overlay
     /// has a VNI but doesn't surface it to peers.
     pub const fn vni_advertised_to_peers(self) -> bool {
-        matches!(self, Self::DpuOverlayL3 | Self::OperatorManaged)
+        matches!(self, Self::DpuOverlayL3 | Self::OperatorManaged | Self::FabricManaged)
     }
 }
 
@@ -219,6 +226,7 @@ pub const ALL_VPC_VIRTUALIZATION_TYPES: &[VpcVirtualizationType] = &[
     VpcVirtualizationType::EthernetVirtualizerWithNvue,
     VpcVirtualizationType::Fnn,
     VpcVirtualizationType::Flat,
+    VpcVirtualizationType::TorVrf,
 ];
 
 const ETV_CAPABILITIES: VpcCapabilities = VpcCapabilities {
@@ -260,6 +268,18 @@ const FLAT_CAPABILITIES: VpcCapabilities = VpcCapabilities {
         VpcVirtualizationType::Fnn,
         VpcVirtualizationType::Flat,
     ],
+};
+
+// ToR-VRF: NICo declares the tenant VRF intent; an external K8s-native fabric
+// controller (Hedgehog/EDA) enforces it on the leaf. Host attaches via NIC
+// (HostInband), NICo advertises the VNI so the fabric builds the switch VTEP.
+// Peering is programmed by the fabric controller between ToR-VRF VPCs.
+const TOR_VRF_CAPABILITIES: VpcCapabilities = VpcCapabilities {
+    data_plane: DataPlaneKind::FabricManaged,
+    allowed_segment_types: &[NetworkSegmentType::HostInband],
+    supports_ipv4_prefix: true,
+    supports_ipv6_prefix: true,
+    peers_with: &[VpcVirtualizationType::TorVrf],
 };
 
 /// Why a VPC capability check failed. Each variant carries the parties
@@ -413,6 +433,7 @@ impl VpcVirtualizationTypeCapabilities for VpcVirtualizationType {
             Self::EthernetVirtualizer | Self::EthernetVirtualizerWithNvue => &ETV_CAPABILITIES,
             Self::Fnn => &FNN_CAPABILITIES,
             Self::Flat => &FLAT_CAPABILITIES,
+            Self::TorVrf => &TOR_VRF_CAPABILITIES,
         }
     }
 

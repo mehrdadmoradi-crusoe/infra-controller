@@ -55,6 +55,13 @@ pub enum VpcVirtualizationType {
     /// plane -- routing and ACL enforcement between Flat VPCs and other
     /// VPCs is the network operator's responsibility.
     Flat,
+    /// `TorVrf` is for VPCs whose tenant VRF is enforced on the ToR/leaf
+    /// switch rather than on the DPU. The host attaches via its NIC (no DPU
+    /// overlay), and NICo delegates the per-VPC VRF/VPC programming to an
+    /// external K8s-native fabric controller (Hedgehog/EDA) by emitting its
+    /// CRDs. NICo owns the intent (prefix, VLAN, VNI, gateway from IPAM); the
+    /// fabric controller owns the underlay. See `carbide-fabric`.
+    TorVrf,
 }
 
 impl VpcVirtualizationType {
@@ -63,6 +70,7 @@ impl VpcVirtualizationType {
             Self::EthernetVirtualizer | Self::EthernetVirtualizerWithNvue => "etv",
             Self::Fnn => "fnn",
             Self::Flat => "flat",
+            Self::TorVrf => "tor",
         }
     }
 }
@@ -165,6 +173,10 @@ mod sqlx_tests {
             "Flat encodes as flat" {
                 VpcVirtualizationType::Flat => "flat".to_string(),
             }
+
+            "TorVrf encodes as tor" {
+                VpcVirtualizationType::TorVrf => "tor".to_string(),
+            }
         );
     }
 }
@@ -252,6 +264,7 @@ impl FromStr for VpcVirtualizationType {
             "etv" | "etv_nvue" => Ok(Self::EthernetVirtualizer),
             "fnn" => Ok(Self::Fnn),
             "flat" => Ok(Self::Flat),
+            "tor" => Ok(Self::TorVrf),
             x => Err(eyre::eyre!(format!("Unknown virt type {}", x))),
         }
     }
