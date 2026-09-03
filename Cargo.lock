@@ -1164,6 +1164,7 @@ dependencies = [
  "carbide-dpa",
  "carbide-dpa-manager",
  "carbide-dpf",
+ "carbide-fabric",
  "carbide-firmware",
  "carbide-health-metrics",
  "carbide-health-report",
@@ -1885,6 +1886,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "carbide-fabric"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

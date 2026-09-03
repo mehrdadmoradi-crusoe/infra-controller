@@ -1,0 +1,30 @@
+[package]
+name = "carbide-fabric"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "carbide_fabric"
+
+# Delegated ToR-VRF backend: NICo emits tenant VRF/VPC intent as Hedgehog CRDs
+# (vpc.githedgehog.com/v1beta1) to an external K8s-native fabric controller.
+# Mirrors carbide-dpf (the DPU/DPF client). Gated off by default; the fabric
+# controller owns the underlay (Connection/External), NICo emits VPC/VPCAttachment/
+# VPCPeering/ExternalPeering only.
+
+[dependencies]
+kube = { default-features = false, features = [
+  "client",
+  "runtime",
+  "rustls-tls",
+  "aws-lc-rs",
+], workspace = true }
+k8s-openapi = { features = ["latest"], workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }

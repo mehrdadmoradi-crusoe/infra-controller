@@ -38,6 +38,7 @@ carbide-authn = { path = "../authn" }
 carbide-dpa = { path = "../dpa" }
 carbide-dpa-manager = { path = "../dpa-manager" }
 carbide-dpf = { path = "../dpf" }
+carbide-fabric = { path = "../fabric" }
 carbide-firmware = { path = "../firmware" }
 carbide-health-metrics = { path = "../health-metrics" }
 carbide-health-report = { path = "../health-report" }

@@ -606,6 +606,11 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub dpf: DpfConfig,
 
+    /// Delegated ToR-VRF fabric backend (Hedgehog/EDA). Off by default; when enabled,
+    /// NICo emits tenant VPC/VRF intent to an external K8s-native fabric controller.
+    #[serde(default)]
+    pub fabric: carbide_fabric::FabricConfig,
+
     /// The URL to use for overriding the PXE boot url on X86 machines.
     #[serde(default)]
     pub x86_pxe_boot_url_override: Option<String>,
@@ -2934,6 +2939,7 @@ mod tests {
                 override_target_ip: None,
                 override_target_port: None,
                 bmc_proxy: carbide_site_explorer::config::bmc_proxy(None),
+                bmc_proxy_overrides: carbide_site_explorer::config::bmc_proxy_overrides_default(),
                 allow_changing_bmc_proxy: None,
                 reset_rate_limit: Duration::hours(1),
                 admin_segment_type_non_dpu: Arc::new(false.into()),
@@ -3131,6 +3137,7 @@ mod tests {
                 override_target_ip: Some("1.2.3.4".to_owned()),
                 override_target_port: Some(10443),
                 bmc_proxy: carbide_site_explorer::config::bmc_proxy(None),
+                bmc_proxy_overrides: carbide_site_explorer::config::bmc_proxy_overrides_default(),
                 allow_changing_bmc_proxy: None,
                 reset_rate_limit: Duration::hours(2),
                 admin_segment_type_non_dpu: Arc::new(false.into()),
@@ -3475,6 +3482,7 @@ mod tests {
                 override_target_ip: Some("1.2.3.4".to_owned()),
                 override_target_port: Some(10443),
                 bmc_proxy: carbide_site_explorer::config::bmc_proxy(None),
+                bmc_proxy_overrides: carbide_site_explorer::config::bmc_proxy_overrides_default(),
                 allow_changing_bmc_proxy: None,
                 reset_rate_limit: Duration::hours(2),
                 admin_segment_type_non_dpu: Arc::new(false.into()),
