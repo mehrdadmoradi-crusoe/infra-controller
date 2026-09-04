@@ -1,0 +1,28 @@
+[package]
+name = "carbide-fabric-manager"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "carbide_fabric_manager"
+
+# Periodic reconcile manager for the delegated ToR-VRF backend. On a timer it
+# reads NICo's TorVrf VPCs and drives the fabric controller (via carbide-fabric's
+# FabricOperations) so the switch VRFs match declared intent. Level-triggered,
+# no per-object controller_state -- mirrors nvlink-manager / ib-fabric.
+# Off unless config.enabled; the fabric backend itself is also gated.
+
+[dependencies]
+carbide-fabric = { path = "../fabric" }
+carbide-api-model = { path = "../api-model", default-features = false }
+carbide-network = { path = "../network" }
+
+async-trait = { workspace = true }
+eyre = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
