@@ -55,12 +55,15 @@ pub enum VpcVirtualizationType {
     /// plane -- routing and ACL enforcement between Flat VPCs and other
     /// VPCs is the network operator's responsibility.
     Flat,
-    /// `TorVrf` is for VPCs whose tenant VRF is enforced on the ToR/leaf
-    /// switch rather than on the DPU. The host attaches via its NIC (no DPU
-    /// overlay), and NICo delegates the per-VPC VRF/VPC programming to an
-    /// external K8s-native fabric controller (Hedgehog/EDA) by emitting its
-    /// CRDs. NICo owns the intent (prefix, VLAN, VNI, gateway from IPAM); the
-    /// fabric controller owns the underlay. See `carbide-fabric`.
+    /// `TorVrf` is a **NICo-managed Flat** VPC: same shape as `Flat` (host on
+    /// its NIC, `HostInband` segment, VRF enforced on the ToR/leaf, VNI
+    /// advertised, no DPU overlay) -- the ONLY difference from `Flat` is *who
+    /// programs the ToR VRF*. `Flat` leaves it to the operator (out of band);
+    /// `TorVrf` has NICo program it by declaring the per-VPC intent (prefix,
+    /// VLAN, VNI, gateway -- all from the VPC's own HostInband segment) to an
+    /// external K8s-native fabric controller (Hedgehog/EDA) via `carbide-fabric`.
+    /// NICo still never writes the underlay. The distinction is management, not
+    /// location: `DataPlaneKind::OperatorManaged` vs `FabricManaged`.
     TorVrf,
 }
 

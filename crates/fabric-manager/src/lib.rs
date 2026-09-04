@@ -4,9 +4,10 @@
 //! Design: a level-triggered periodic manager (like nvlink-manager / ib-fabric),
 //! NOT a per-object state controller -- NICo VPCs carry a `VpcStatus`, not a
 //! state-controller `ControllerState`. Every `run_interval` it lists the `TorVrf`
-//! VPCs and calls `ensure_vrf` so the switch matches intent. Attachment (host
-//! ports) and peering are reconciled the same way; both are marked below as the
-//! next fill-in and currently logged.
+//! VPCs and, for each, reconciles the VRF (`ensure_vrf` from the VPC's own
+//! HostInband segment), every placed host's attachment (`attach_host`, keyed off
+//! the operator-declared `fabric.nico.io/connection` machine label), and peering
+//! with other fabric-managed VPCs (`peer_vpcs` from `vpc_peering`).
 //!
 //! Validated end to end against a Hedgehog vlab via the `nico2hedgehog.py` adapter,
 //! which is this reconcile's executable spec.
@@ -14,16 +15,27 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use model::network_segment::NetworkSegmentType;
 use model::vpc::Vpc;
-use carbide_fabric::{FabricOperations, VrfIntent};
+use carbide_fabric::{FabricOperations, HostAttachment, VrfIntent};
 use carbide_network::virtualization::VpcVirtualizationType;
 use sqlx::PgPool;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+/// Operator-declared label on a host's machine naming the fabric `Connection`
+/// (leaf port wiring) it is cabled to. NetBox-syncable; NICo reads it, never
+/// invents it. A host without it is simply not attached this pass.
+const CONNECTION_LABEL: &str = "fabric.nico.io/connection";
+
+#[cfg(test)]
+mod tests;
+
+/// Reconcile-loop tuning. Whether the loop runs at all is gated in `setup.rs` on
+/// `fabric.enabled` (the backend switch), so there is deliberately no second
+/// `enabled` here to get out of sync with it -- this only carries the cadence.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FabricManagerConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "FabricManagerConfig::default_run_interval")]
     #[serde(with = "humantime_serde_secs")]
     pub run_interval: Duration,
@@ -37,7 +49,7 @@ impl FabricManagerConfig {
 
 impl Default for FabricManagerConfig {
     fn default() -> Self {
-        Self { enabled: false, run_interval: Self::default_run_interval() }
+        Self { run_interval: Self::default_run_interval() }
     }
 }
 
@@ -72,6 +84,13 @@ impl std::fmt::Debug for FabricManager {
 impl FabricManager {
     pub fn new(fabric: Arc<dyn FabricOperations>, db: PgPool, config: FabricManagerConfig) -> Self {
         Self { fabric, db, config }
+    }
+
+    /// Spawn the reconcile loop into `join_set` (mirror of the other periodic
+    /// managers). The caller gates this on `fabric.enabled`, so it spawns
+    /// unconditionally here.
+    pub fn start(self, join_set: &mut JoinSet<()>, cancel_token: CancellationToken) {
+        join_set.spawn(async move { self.run(cancel_token).await });
     }
 
     /// Timer loop; stops on cancel.
@@ -117,36 +136,112 @@ impl FabricManager {
         Ok(vpcs)
     }
 
-    /// Ensure the fabric VRF for one VPC matches NICo's intent.
-    ///
-    /// First cut: emits `ensure_vrf` from the VPC's own fields (id, name, VNI).
-    /// The subnet/VLAN/gateway come from the VPC's prefix + bound segment; wiring
-    /// that lookup (and `attach_host` per instance placement, `peer_vpcs` per
-    /// vpc_peering) is the next fill-in -- logged here so the loop is observable.
+    /// Ensure the fabric state for one ToR-VRF VPC matches NICo's intent:
+    /// the VRF itself, every placed host's attachment, and peering with other
+    /// fabric-managed VPCs. Every field has a real source (no invented data);
+    /// anything not provisioned yet is skipped so the next pass picks it up
+    /// (level-triggered).
     async fn reconcile_vpc(&self, vpc: &Vpc) -> eyre::Result<()> {
         debug_assert_eq!(
             vpc.config.network_virtualization_type,
             VpcVirtualizationType::TorVrf
         );
+
+        // (a) The VPC owns a HostInband segment; it supplies subnet/VLAN/gateway.
+        let segments = db::network_segment::for_vpc(&self.db, vpc.id).await?;
+        let Some(seg) = segments
+            .iter()
+            .find(|s| s.config.segment_type == NetworkSegmentType::HostInband)
+        else {
+            tracing::info!(vpc = %vpc.id, "fabric-manager: no HostInband segment yet; skipping");
+            return Ok(());
+        };
+        let Some(vlan_id) = seg.status.vlan_id else {
+            tracing::info!(vpc = %vpc.id, "fabric-manager: segment VLAN not allocated yet; skipping");
+            return Ok(());
+        };
+        // A HostInband segment normally has one prefix; take the first that carries
+        // a gateway (subnet + gateway must go to the fabric together).
+        let Some(prefix) = seg.prefixes.iter().find(|p| p.gateway.is_some()) else {
+            tracing::info!(vpc = %vpc.id, "fabric-manager: segment prefix/gateway not ready; skipping");
+            return Ok(());
+        };
         let intent = VrfIntent {
             nico_vpc_id: vpc.id.to_string(),
             name: vpc.metadata.name.clone(),
-            // TODO(fabric): source subnet/vlan/gateway from the VPC prefix + segment
-            // (carbide_api_db::vpc_peering::get_prefixes_by_vpcs + network_segment).
-            subnet_cidr: String::new(),
-            vlan: 0,
-            gateway: String::new(),
+            subnet_cidr: prefix.prefix.to_string(),
+            vlan: vlan_id as u16,
+            gateway: prefix
+                .gateway
+                .expect("gateway checked Some above")
+                .to_string(),
             vni: vpc.config.vni.map(|v| v as u32),
             dhcp_range: None,
         };
-        if intent.subnet_cidr.is_empty() {
-            // Don't push an incomplete VRF; surface that the prefix lookup is pending.
-            tracing::info!(vpc = %vpc.id, name = %intent.name,
-                "fabric-manager: ToR-VRF VPC seen; prefix/segment lookup pending before ensure_vrf");
-            return Ok(());
-        }
         self.fabric.ensure_vrf(&intent).await?;
-        // TODO(fabric): attach_host per instance placement; peer_vpcs per vpc_peering.
+
+        // (b) Attach every placed host whose operator-declared Connection label is
+        // set. NICo references the fabric-owned wiring by name; it never invents it.
+        let instance_ids = db::instance::find_ids(
+            &self.db,
+            model::instance::InstanceSearchFilter {
+                label: None,
+                tenant_org_id: None,
+                vpc_id: Some(vpc.id.to_string()),
+                instance_type_id: None,
+            },
+        )
+        .await?;
+        for id in instance_ids {
+            let Some(inst) = db::instance::find_by_id(&self.db, id).await? else {
+                continue;
+            };
+            let Some(machine) = db::machine::find_one(
+                &self.db,
+                &inst.machine_id,
+                model::machine::machine_search_config::MachineSearchConfig::default(),
+            )
+            .await?
+            else {
+                continue;
+            };
+            let Some(connection) = machine.metadata.labels.get(CONNECTION_LABEL) else {
+                tracing::debug!(vpc = %vpc.id, machine = %inst.machine_id,
+                    "fabric-manager: host has no {CONNECTION_LABEL} label; not attaching");
+                continue;
+            };
+            self.fabric
+                .attach_host(&HostAttachment {
+                    vpc_name: vpc.metadata.name.clone(),
+                    connection: connection.clone(),
+                })
+                .await?;
+        }
+
+        // (c) Peer with other fabric-managed (TorVrf) VPCs. NICo programs peering
+        // only within the fabric-managed set; a Flat peer's side is the operator's.
+        let mut conn = self
+            .db
+            .acquire()
+            .await
+            .map_err(|e| eyre::eyre!("fabric-manager: acquire connection: {e}"))?;
+        let peer_ids = db::vpc_peering::get_vpc_peer_ids(&mut conn, vpc.id).await?;
+        drop(conn);
+        for peer_id in peer_ids {
+            let Some(peer) = db::vpc::find_by(
+                &self.db,
+                db::ObjectColumnFilter::One(db::vpc::IdColumn, &peer_id),
+            )
+            .await?
+            .pop() else {
+                continue;
+            };
+            if peer.config.network_virtualization_type == VpcVirtualizationType::TorVrf {
+                self.fabric
+                    .peer_vpcs(&vpc.metadata.name, &peer.metadata.name)
+                    .await?;
+            }
+        }
         Ok(())
     }
 }

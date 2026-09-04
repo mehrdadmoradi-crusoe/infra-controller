@@ -492,22 +492,6 @@ pub async fn start_api(
         .map_err(|e| eyre::eyre!("Failed to build NMX-C client pool: {e}"))?;
     let shared_nmxc_pool: Arc<dyn libnmxc::NmxcPool> = Arc::new(nmxc_client_pool);
 
-    // Delegated ToR-VRF fabric backend (Hedgehog/EDA). Off by default; when enabled,
-    // NICo emits tenant VPC/VRF intent to the external fabric controller. Mirror of
-    // dpf_sdk. Consumed by the fabric-vpc state controller (landing next); underscore
-    // keeps it warning-free until that controller is wired in.
-    let _fabric_ops: Option<Arc<dyn carbide_fabric::FabricOperations>> =
-        if carbide_config.fabric.enabled {
-            tracing::info!(backend = ?carbide_config.fabric.backend, "Initializing fabric backend");
-            Some(Arc::new(
-                carbide_fabric::HedgehogFabric::try_default(&carbide_config.fabric)
-                    .await
-                    .map_err(|e| eyre::eyre!("Failed to init fabric backend: {e}"))?,
-            ))
-        } else {
-            None
-        };
-
     // Create DPF SDK and initialize CRs if enabled
     // If we end up having static DPUDeployments, we could move the static CRs outside of the API.
     let dpf_sdk: Option<Arc<dyn DpfOperations>> = if carbide_config.dpf.enabled {
@@ -1416,6 +1400,25 @@ async fn initialize_and_start_controllers<'a>(
         work_lock_manager_handle: work_lock_manager_handle.clone(),
     })
     .start(join_set, cancel_token.clone())?;
+
+    // Delegated ToR-VRF fabric reconcile (Hedgehog/EDA). Off unless fabric.enabled.
+    // When on, it drives the external fabric controller so leaf VRFs match NICo's
+    // TorVrf VPC intent. Mirror of the other periodic managers; NICo never writes
+    // the underlay -- it only emits per-VPC VPC/VPCAttachment/VPCPeering CRDs.
+    if carbide_config.fabric.enabled {
+        tracing::info!(backend = ?carbide_config.fabric.backend, "Initializing ToR-VRF fabric backend");
+        let fabric_ops: Arc<dyn carbide_fabric::FabricOperations> = Arc::new(
+            carbide_fabric::HedgehogFabric::try_default(&carbide_config.fabric)
+                .await
+                .map_err(|e| eyre::eyre!("Failed to init fabric backend: {e}"))?,
+        );
+        carbide_fabric_manager::FabricManager::new(
+            fabric_ops,
+            db_pool.clone(),
+            carbide_config.fabric_manager.clone(),
+        )
+        .start(join_set, cancel_token.clone());
+    }
 
     if carbide_config.is_dpa_enabled() {
         let mqtt_client =

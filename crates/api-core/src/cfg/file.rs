@@ -611,6 +611,10 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub fabric: carbide_fabric::FabricConfig,
 
+    /// Cadence for the ToR-VRF reconcile loop. Only runs when `fabric.enabled`.
+    #[serde(default)]
+    pub fabric_manager: carbide_fabric_manager::FabricManagerConfig,
+
     /// The URL to use for overriding the PXE boot url on X86 machines.
     #[serde(default)]
     pub x86_pxe_boot_url_override: Option<String>,

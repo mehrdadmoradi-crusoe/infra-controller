@@ -8,6 +8,11 @@ authors.workspace = true
 [lib]
 name = "carbide_fabric"
 
+[features]
+# Exposes MockFabricOperations (mockall) to downstream test code, mirroring how
+# carbide-machine-controller gates MockDpfOperations. Off in normal builds.
+test-support = ["dep:mockall"]
+
 # Delegated ToR-VRF backend: NICo emits tenant VRF/VPC intent as Hedgehog CRDs
 # (vpc.githedgehog.com/v1beta1) to an external K8s-native fabric controller.
 # Mirrors carbide-dpf (the DPU/DPF client). Gated off by default; the fabric
@@ -28,3 +33,4 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+mockall = { workspace = true, optional = true }

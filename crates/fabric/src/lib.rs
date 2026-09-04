@@ -88,7 +88,9 @@ pub struct HostAttachment {
 }
 
 /// The application-facing trait NICo's state controller calls — mirror of
-/// `DpfOperations`. A `MockFabricOperations` (mockall) will back the tests.
+/// `DpfOperations`. `MockFabricOperations` (mockall) backs the tests when the
+/// `test-support` feature is on.
+#[cfg_attr(feature = "test-support", mockall::automock)]
 #[async_trait]
 pub trait FabricOperations: Send + Sync + std::fmt::Debug {
     /// Create/update the tenant VRF (Hedgehog `VPC`, l3vni).

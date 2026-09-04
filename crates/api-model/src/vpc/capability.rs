@@ -270,10 +270,15 @@ const FLAT_CAPABILITIES: VpcCapabilities = VpcCapabilities {
     ],
 };
 
-// ToR-VRF: NICo declares the tenant VRF intent; an external K8s-native fabric
-// controller (Hedgehog/EDA) enforces it on the leaf. Host attaches via NIC
-// (HostInband), NICo advertises the VNI so the fabric builds the switch VTEP.
-// Peering is programmed by the fabric controller between ToR-VRF VPCs.
+// ToR-VRF is a NICo-*managed* Flat: byte-for-byte the same profile as
+// FLAT_CAPABILITIES above (NIC attach, HostInband, IPv4+IPv6, VNI advertised,
+// no routing profiles) except it is `FabricManaged` instead of `OperatorManaged`
+// -- i.e. NICo programs the ToR VRF (by declaring intent to an external
+// K8s-native fabric controller, Hedgehog/EDA) instead of leaving it to the
+// operator. The distinction from Flat is *management*, not location: Flat is
+// already ToR-enforced. `peers_with` is restricted to other ToR-VRF VPCs because
+// NICo programs peering only within the fabric-managed set (a Flat peer's side
+// would be the operator's to wire).
 const TOR_VRF_CAPABILITIES: VpcCapabilities = VpcCapabilities {
     data_plane: DataPlaneKind::FabricManaged,
     allowed_segment_types: &[NetworkSegmentType::HostInband],

@@ -28,6 +28,7 @@ impl From<rpc::VpcVirtualizationType> for VpcVirtualizationType {
             rpc::VpcVirtualizationType::EthernetVirtualizerWithNvue => Self::EthernetVirtualizer,
             rpc::VpcVirtualizationType::Fnn => Self::Fnn,
             rpc::VpcVirtualizationType::Flat => Self::Flat,
+            rpc::VpcVirtualizationType::Tor => Self::TorVrf,
             // Following are deprecated.
             rpc::VpcVirtualizationType::FnnClassic => Self::Fnn,
             rpc::VpcVirtualizationType::FnnL3 => Self::Fnn,
@@ -44,6 +45,7 @@ impl From<VpcVirtualizationType> for rpc::VpcVirtualizationType {
             }
             VpcVirtualizationType::Fnn => rpc::VpcVirtualizationType::Fnn,
             VpcVirtualizationType::Flat => rpc::VpcVirtualizationType::Flat,
+            VpcVirtualizationType::TorVrf => rpc::VpcVirtualizationType::Tor,
         }
     }
 }
@@ -63,6 +65,7 @@ pub fn vpc_virtualization_type_try_from_rpc(
         }
         x if x == rpc::VpcVirtualizationType::Fnn as i32 => VpcVirtualizationType::Fnn,
         x if x == rpc::VpcVirtualizationType::Flat as i32 => VpcVirtualizationType::Flat,
+        x if x == rpc::VpcVirtualizationType::Tor as i32 => VpcVirtualizationType::TorVrf,
         _ => {
             return Err(RpcDataConversionError::InvalidVpcVirtualizationType(value));
         }

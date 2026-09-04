@@ -1744,6 +1744,12 @@ enum VpcVirtualizationType {
   // between Flat VPCs and other VPCs is the network operator's
   // responsibility.
   FLAT = 6;
+  // TOR is for VPCs whose tenant VRF is enforced on the ToR/leaf switch
+  // rather than the DPU. The host attaches via its NIC; Carbide declares the
+  // per-VPC VRF/VPC intent and delegates switch programming to an external
+  // K8s-native fabric controller (Hedgehog/EDA). Carbide never writes the
+  // underlay. See the carbide-fabric crate.
+  TOR = 7;
 }
 
 message VpcUpdateRequest {

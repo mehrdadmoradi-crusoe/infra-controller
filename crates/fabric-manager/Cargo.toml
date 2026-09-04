@@ -17,6 +17,7 @@ name = "carbide_fabric_manager"
 [dependencies]
 carbide-fabric = { path = "../fabric" }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-api-db = { path = "../api-db" }
 carbide-network = { path = "../network" }
 
 async-trait = { workspace = true }
@@ -26,3 +27,14 @@ sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# DB-integration test harness (mirrors state-controller): #[carbide_macros::sqlx_test]
+# clones a migrated template DB per test. carbide-fabric with test-support pulls in
+# MockFabricOperations so we assert the reconcile's calls without a real fabric.
+carbide-macros = { path = "../macros" }
+carbide-sqlx-testing = { path = "../sqlx-testing" }
+carbide-fabric = { path = "../fabric", features = ["test-support"] }
+carbide-uuid = { path = "../uuid" }
+config-version = { path = "../config-version" }
+uuid = { workspace = true }

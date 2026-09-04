@@ -135,7 +135,7 @@ pub async fn get_vpc_peer_ids(
                 CASE
                     WHEN vp.vpc1_id = $1 THEN vp.vpc2_id
                     ELSE vp.vpc1_id
-                END AS vpc_peer_id
+                END AS id
             FROM vpc_peerings vp
             WHERE vp.vpc1_id = $1 OR vp.vpc2_id = $1
         "#;
