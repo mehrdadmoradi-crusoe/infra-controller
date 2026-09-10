@@ -193,7 +193,7 @@ pub async fn create_initial_vpcs(
                 .map_err(CarbideError::from)?;
         }
 
-        db::vpc::persist(vpc, VpcStatus { vni: Some(vni) }, &mut txn).await?;
+        db::vpc::persist(vpc, VpcStatus { vni: Some(vni), fabric: None }, &mut txn).await?;
         tracing::info!("Created VPC {name}");
     }
 
@@ -480,6 +480,7 @@ pub(crate) async fn create_admin_vpc(
         admin_vpc,
         VpcStatus {
             vni: Some(configured_vni),
+            fabric: None,
         },
         &mut txn,
     )
