@@ -34,6 +34,12 @@ pub enum VpcVirtualizationTypeArg {
     /// VPCs is the network operator's responsibility.
     #[clap(name = "flat")]
     Flat,
+    /// `Tor` is Flat with NICo managing the VRF: the same NIC-attached,
+    /// `HostInband` model, but the leaf VRF is declared to an external fabric
+    /// controller and reconciled by NICo instead of being programmed by an
+    /// operator. Requires `[fabric] enabled = true` on the site.
+    #[clap(name = "tor", alias = "tor-vrf")]
+    Tor,
 }
 
 impl From<VpcVirtualizationTypeArg> for ::rpc::forge::VpcVirtualizationType {
@@ -45,6 +51,7 @@ impl From<VpcVirtualizationTypeArg> for ::rpc::forge::VpcVirtualizationType {
             }
             VpcVirtualizationTypeArg::Fnn => ::rpc::forge::VpcVirtualizationType::Fnn,
             VpcVirtualizationTypeArg::Flat => ::rpc::forge::VpcVirtualizationType::Flat,
+            VpcVirtualizationTypeArg::Tor => ::rpc::forge::VpcVirtualizationType::Tor,
         }
     }
 }
