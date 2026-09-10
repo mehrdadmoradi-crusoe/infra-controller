@@ -1,0 +1,11 @@
+# Developer-local Helm overrides for the kind demo. Intentionally empty in git.
+# Typical local content (never commit it):
+#
+# nico-api:
+#   siteConfig:
+#     extraFiles:
+#       kubeconfig: |
+#         apiVersion: v1
+#         kind: Config
+#         ...   # credentials for the ToR-VRF fabric controller (EDA / Hedgehog)
+{}

@@ -6,6 +6,11 @@ nico-api:
     requests:
       cpu: "1"
       memory: "1Gi"
+  extraEnv:
+    # kubeconfig for the ToR-VRF fabric controller; the file itself is supplied
+    # through siteConfig.extraFiles from the local, uncommitted values file.
+    - name: KUBECONFIG
+      value: /etc/forge/carbide-api/site/kubeconfig
   siteConfig:
     enabled: true
     nicoApiSiteConfig: |
@@ -106,6 +111,17 @@ nico-api:
       autoupdate = true
       run_interval = "10s"
       concurrency_limit = 100
+
+      # Delegated ToR-VRF backend: NICo emits VRF intent to a fabric controller
+      # (Nokia EDA here) reached via $KUBECONFIG; see extraEnv and the kubeconfig
+      # supplied through siteConfig.extraFiles in the local values file.
+      [fabric]
+      enabled = true
+      backend = "eda"
+      namespace = "eda"
+
+      [fabric_manager]
+      run_interval = 30
 
       # DEMO: GB200 NVL72 rack profile (compute=2 trays, switch=2; power_shelf omitted=0).
       # Rack gates count by rack_id FK only; name/vendor are cosmetic.

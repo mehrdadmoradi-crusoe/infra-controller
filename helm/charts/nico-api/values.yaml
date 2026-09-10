@@ -209,6 +209,9 @@ configFiles:
 siteConfig:
   enabled: true
   nicoApiSiteConfig: ""  # Must include [pools.lo-ip], [pools.vlan-id], [pools.vni], [pools.vpc-vni]
+  ## Additional files placed next to the site config (filename -> content), e.g. a
+  ## kubeconfig for the delegated ToR-VRF fabric backend. Keep secrets out of git.
+  extraFiles: {}
 
 ## NICo Web UI hostname (always created as ConfigMap)
 hostname: "nico.local"

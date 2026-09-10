@@ -39,6 +39,11 @@ data:
   # Both filenames populated for dual carbide/nico image support.
   carbide-api-site-config.toml: {{ .Values.siteConfig.nicoApiSiteConfig | default "" | quote }}
   nico-api-site-config.toml:    {{ .Values.siteConfig.nicoApiSiteConfig | default "" | quote }}
+  {{- /* Extra site files (e.g. a kubeconfig for the ToR-VRF fabric backend),
+         mounted alongside the site config under /etc/nico/nico-api/site/. */}}
+  {{- range $name, $content := .Values.siteConfig.extraFiles }}
+  {{ $name }}: {{ $content | quote }}
+  {{- end }}
 {{- end }}
 {{- if .Values.vaultClusterInfo }}
 ---

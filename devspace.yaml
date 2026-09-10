@@ -87,6 +87,9 @@ deployments:
       valuesFiles:
         - dev/deployment/devspace/values.base.yaml
         - dev/deployment/devspace/values.generated.yaml
+        # Developer-local overrides (fabric-controller kubeconfig etc). Committed as
+        # an empty map; keep local edits out of git (`git update-index --skip-worktree`).
+        - dev/deployment/devspace/values.local.yaml
   machine-a-tron-local:
     namespace: ${LOCAL_DEV_NAMESPACE}
     updateImageTags: true
