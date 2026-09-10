@@ -203,7 +203,9 @@ impl FabricManager {
                 .gateway
                 .expect("gateway checked Some above")
                 .to_string(),
-            vni: vpc.config.vni.map(|v| v as u32),
+            // The allocated VNI lives in status; config.vni is only the tenant's
+            // explicit request, if any.
+            vni: vpc.status.vni.or(vpc.config.vni).map(|v| v as u32),
             dhcp_range: None,
         };
         self.fabric.ensure_vrf(&intent).await?;
