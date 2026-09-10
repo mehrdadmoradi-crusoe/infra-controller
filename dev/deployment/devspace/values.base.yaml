@@ -118,7 +118,7 @@ nico-api:
       [fabric]
       enabled = true
       backend = "eda"
-      namespace = "eda"
+      namespace = "ej-site1"
 
       [fabric_manager]
       run_interval = 30
