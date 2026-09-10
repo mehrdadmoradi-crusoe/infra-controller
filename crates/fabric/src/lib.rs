@@ -17,7 +17,9 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams};
+use kube::api::{
+    Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams,
+};
 use kube::Client;
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +103,12 @@ pub trait FabricOperations: Send + Sync + std::fmt::Debug {
     async fn peer_vpcs(&self, a: &str, b: &str) -> Result<(), FabricError>;
     /// Read back the programmed state of a VRF for reconciliation/status.
     async fn get_vrf_status(&self, vpc_name: &str) -> Result<Option<serde_json::Value>, FabricError>;
+    /// List NICo-managed VRFs on the fabric as `(hedgehog_vpc_name, nico_vpc_id)`,
+    /// so the reconcile can garbage-collect VRFs whose NICo VPC is gone.
+    async fn list_vrfs(&self) -> Result<Vec<(String, String)>, FabricError>;
+    /// Tear down a tenant VRF and everything attached to it (VPCAttachments +
+    /// VPCPeerings + the VPC). Idempotent: deleting an absent object is a no-op.
+    async fn delete_vrf(&self, vpc_name: &str) -> Result<(), FabricError>;
 }
 
 /// Hedgehog-backed implementation, applying `vpc.githedgehog.com/v1beta1` CRDs via
@@ -157,6 +165,15 @@ impl HedgehogFabric {
         api.patch(name, &PatchParams::apply("carbide-fabric").force(), &Patch::Apply(&obj))
             .await?;
         Ok(())
+    }
+
+    /// Delete one CRD by kind+name; treat a 404 as success (idempotent).
+    async fn delete_obj(&self, kind: &str, name: &str) -> Result<(), FabricError> {
+        match self.api(kind).delete(name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn nico_labels(nico_vpc_id: &str, vni: Option<u32>) -> BTreeMap<String, String> {
@@ -225,6 +242,62 @@ impl FabricOperations for HedgehogFabric {
             Some(o) => Ok(o.data.get("status").cloned()),
             None => Ok(None),
         }
+    }
+
+    async fn list_vrfs(&self) -> Result<Vec<(String, String)>, FabricError> {
+        // Only VPCs NICo created carry the nico.io/vpc-id label.
+        let lp = ListParams::default().labels("nico.io/vpc-id");
+        let mut out = Vec::new();
+        for o in self.api("VPC").list(&lp).await? {
+            let name = o.metadata.name.clone().unwrap_or_default();
+            let nico_id = o
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get("nico.io/vpc-id").cloned())
+                .unwrap_or_default();
+            if !name.is_empty() && !nico_id.is_empty() {
+                out.push((name, nico_id));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete_vrf(&self, vpc_name: &str) -> Result<(), FabricError> {
+        let vpc = Self::hedgehog_vpc_name(vpc_name);
+        // Attachments reference the VPC via spec.subnet = "<vpc>/<subnet>".
+        let subnet_prefix = format!("{vpc}/");
+        for a in self.api("VPCAttachment").list(&ListParams::default()).await? {
+            let belongs = a
+                .data
+                .get("spec")
+                .and_then(|s| s.get("subnet"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.starts_with(&subnet_prefix))
+                .unwrap_or(false);
+            if belongs {
+                if let Some(n) = a.metadata.name.as_deref() {
+                    self.delete_obj("VPCAttachment", n).await?;
+                }
+            }
+        }
+        // Peerings reference the VPC as a key in each spec.permit[] entry.
+        for p in self.api("VPCPeering").list(&ListParams::default()).await? {
+            let involves = p
+                .data
+                .get("spec")
+                .and_then(|s| s.get("permit"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|e| e.as_object()).any(|m| m.contains_key(&vpc)))
+                .unwrap_or(false);
+            if involves {
+                if let Some(n) = p.metadata.name.as_deref() {
+                    self.delete_obj("VPCPeering", n).await?;
+                }
+            }
+        }
+        tracing::info!(vpc = %vpc, "fabric: delete_vrf (VPC + attachments + peerings)");
+        self.delete_obj("VPC", &vpc).await
     }
 }
 

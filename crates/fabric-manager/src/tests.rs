@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use carbide_fabric::{HostAttachment, MockFabricOperations, VrfIntent};
+use carbide_fabric::{FabricError, HostAttachment, MockFabricOperations, VrfIntent};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
@@ -39,7 +39,7 @@ async fn seed_tor_vpc(
             routing_profile_type: None,
             vni,
         },
-        model::vpc::VpcStatus { vni: None },
+        model::vpc::VpcStatus { vni: None, fabric: None },
         conn,
     )
     .await?;
@@ -138,7 +138,13 @@ async fn reconciles_vrf_and_peering(pool: sqlx::PgPool) -> eyre::Result<()> {
         .returning(|_, _| Ok(()));
     // no instances placed -> no host attachment.
     fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    // The fabric reports a status object -> the reconcile must persist it on the
+    // VPC as `programmed` (asserted below).
+    fabric
+        .expect_get_vrf_status()
+        .returning(|_| Ok(Some(serde_json::json!({"ready": true}))));
 
+    let pool2 = pool.clone();
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
     // Explicit loop so a reconcile error surfaces (run_single_iteration swallows them).
     let vpcs = mgr.list_tor_vrf_vpcs().await?;
@@ -148,6 +154,15 @@ async fn reconciles_vrf_and_peering(pool: sqlx::PgPool) -> eyre::Result<()> {
             .await
             .map_err(|e| eyre::eyre!("reconcile {} failed: {e}", v.metadata.name))?;
     }
+    // Status persistence: tor-a reached ensure_vrf + get_vrf_status, so its
+    // VpcStatus now carries what the fabric reported (tor-b skipped before that).
+    let a = db::vpc::find_by(&pool2, db::ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_a))
+        .await?
+        .pop()
+        .expect("tor-a still present");
+    let fs = a.status.fabric.expect("fabric status persisted after reconcile");
+    assert!(fs.programmed, "fabric reported a status object => programmed");
+    assert!(fs.detail.is_some(), "raw controller status retained for diagnosis");
     Ok(())
 }
 
@@ -217,6 +232,7 @@ async fn attaches_host_from_connection_label(pool: sqlx::PgPool) -> eyre::Result
 
     let mut fabric = MockFabricOperations::new();
     fabric.expect_ensure_vrf().returning(|_| Ok(()));
+    fabric.expect_get_vrf_status().returning(|_| Ok(None));
     // The host is attached to the fabric Connection named by its label.
     fabric
         .expect_attach_host()
@@ -244,9 +260,74 @@ async fn skips_vpc_without_ready_segment(pool: sqlx::PgPool) -> eyre::Result<()>
     let mut fabric = MockFabricOperations::new();
     // Must not push an incomplete VRF.
     fabric.expect_ensure_vrf().times(0).returning(|_| Ok(()));
+    // run_single_iteration also runs GC; nothing on the fabric to collect.
+    fabric.expect_list_vrfs().returning(|| Ok(vec![]));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
     // The VPC is still counted as reconciled (skipped cleanly).
+    assert_eq!(mgr.run_single_iteration().await?, 1);
+    Ok(())
+}
+
+#[carbide_macros::sqlx_test]
+async fn gc_tears_down_orphaned_vrf(pool: sqlx::PgPool) -> eyre::Result<()> {
+    // One live ToR-VRF VPC (no segment -> skipped this pass, but still live intent).
+    let mut txn = pool.begin().await?;
+    let live = seed_tor_vpc(&mut txn, "tor-live", Some(1)).await?;
+    txn.commit().await?;
+    let live_id = live.to_string();
+
+    let mut fabric = MockFabricOperations::new();
+    fabric.expect_ensure_vrf().times(0).returning(|_| Ok(()));
+    // The fabric reports two VRFs: one still backed by NICo intent, one whose
+    // NICo VPC is gone. Only the orphan must be torn down.
+    fabric.expect_list_vrfs().returning(move || {
+        Ok(vec![
+            ("tor-live".to_string(), live_id.clone()),
+            ("torvold".to_string(), "dead-nico-id".to_string()),
+        ])
+    });
+    fabric
+        .expect_delete_vrf()
+        .withf(|name: &str| name == "torvold")
+        .times(1)
+        .returning(|_| Ok(()));
+
+    let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
+    assert_eq!(mgr.run_single_iteration().await?, 1);
+    Ok(())
+}
+
+#[carbide_macros::sqlx_test]
+async fn fabric_errors_are_isolated_and_not_fatal(pool: sqlx::PgPool) -> eyre::Result<()> {
+    // Two live ToR-VRF VPCs, both with ready segments, so both reach the fabric.
+    let mut txn = pool.begin().await?;
+    let ok = seed_tor_vpc(&mut txn, "tor-ok", Some(1)).await?;
+    seed_hostinband_segment(&mut txn, ok, 101, "10.11.0.0/24", "10.11.0.1").await?;
+    let bad = seed_tor_vpc(&mut txn, "tor-err", Some(2)).await?;
+    seed_hostinband_segment(&mut txn, bad, 102, "10.12.0.0/24", "10.12.0.1").await?;
+    txn.commit().await?;
+
+    let unreachable = || FabricError::Invalid("fabric unreachable".to_string());
+    let mut fabric = MockFabricOperations::new();
+    // The fabric fails for one tenant only; the other must still converge.
+    fabric
+        .expect_ensure_vrf()
+        .withf(|i: &VrfIntent| i.name == "tor-err")
+        .returning(move |_| Err(unreachable()));
+    fabric
+        .expect_ensure_vrf()
+        .withf(|i: &VrfIntent| i.name == "tor-ok")
+        .returning(|_| Ok(()));
+    fabric.expect_get_vrf_status().returning(|_| Ok(None));
+    // GC can't list the fabric either: it must degrade to a no-op, not fail the pass.
+    fabric.expect_list_vrfs().returning(move || Err(unreachable()));
+    fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    fabric.expect_delete_vrf().times(0).returning(|_| Ok(()));
+
+    let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
+    // No panic, no Err out of the pass: the healthy tenant counts, the failed one
+    // is logged and skipped, and GC is skipped when the fabric can't be listed.
     assert_eq!(mgr.run_single_iteration().await?, 1);
     Ok(())
 }

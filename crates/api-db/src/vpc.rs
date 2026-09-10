@@ -233,6 +233,25 @@ pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseR
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Record what the delegated fabric controller reports for a ToR-VRF VPC.
+/// Mirrors `set_vni`: an additive `jsonb_set` on the `status` column.
+pub async fn set_fabric_status(
+    vpc_id: VpcId,
+    fabric: &model::vpc::FabricVrfStatus,
+    txn: &mut PgConnection,
+) -> DatabaseResult<Vpc> {
+    let query = "UPDATE vpcs
+            SET status=jsonb_set(status, '{fabric}', $1::jsonb, true), updated=NOW()
+            WHERE id=$2 AND deleted is null
+            RETURNING *";
+    sqlx::query_as(query)
+        .bind(sqlx::types::Json(fabric))
+        .bind(vpc_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 pub async fn find_by_name(txn: impl DbReader<'_>, name: &str) -> Result<Vec<Vpc>, DatabaseError> {
     find_by(txn, ObjectColumnFilter::One(NameColumn, &name)).await
 }

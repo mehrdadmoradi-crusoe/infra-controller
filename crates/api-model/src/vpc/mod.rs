@@ -48,10 +48,28 @@ pub struct VpcConfig {
     pub routing_profile_type: Option<String>,
 }
 
+/// What the delegated fabric controller last reported for this VPC's ToR VRF.
+/// Written by fabric-manager after each reconcile pass; only meaningful for
+/// `TorVrf` VPCs. Additive on the `status` JSON column: existing rows
+/// deserialize with `fabric: None`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FabricVrfStatus {
+    /// The fabric controller currently holds an object for this VRF.
+    pub programmed: bool,
+    pub observed_at: DateTime<Utc>,
+    /// Raw controller-reported status (backend-specific), kept for drift diagnosis.
+    #[serde(default)]
+    pub detail: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct VpcStatus {
     /// Allocated VNI.
     pub vni: Option<i32>,
+    /// Delegated-fabric VRF status (ToR-VRF VPCs only). Persistence contract:
+    /// additive, `#[serde(default)]`.
+    #[serde(default)]
+    pub fabric: Option<FabricVrfStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

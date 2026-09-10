@@ -27,6 +27,7 @@ sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 # DB-integration test harness (mirrors state-controller): #[carbide_macros::sqlx_test]
@@ -38,3 +39,4 @@ carbide-fabric = { path = "../fabric", features = ["test-support"] }
 carbide-uuid = { path = "../uuid" }
 config-version = { path = "../config-version" }
 uuid = { workspace = true }
+serde_json = { workspace = true }

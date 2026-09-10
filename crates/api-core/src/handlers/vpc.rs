@@ -139,7 +139,7 @@ pub(crate) async fn create(
 
     new_vpc.routing_profile_type = requested_profile_type;
 
-    let vpc = db::vpc::persist(new_vpc, VpcStatus { vni }, &mut txn).await?;
+    let vpc = db::vpc::persist(new_vpc, VpcStatus { vni, fabric: None }, &mut txn).await?;
 
     let rpc_out: rpc::Vpc = vpc.into();
 

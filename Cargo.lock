@@ -1165,6 +1165,7 @@ dependencies = [
  "carbide-dpa-manager",
  "carbide-dpf",
  "carbide-fabric",
+ "carbide-fabric-manager",
  "carbide-firmware",
  "carbide-health-metrics",
  "carbide-health-report",
@@ -1895,11 +1896,36 @@ dependencies = [
  "async-trait",
  "k8s-openapi",
  "kube",
+ "mockall",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "carbide-fabric-manager"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "carbide-api-db",
+ "carbide-api-model",
+ "carbide-fabric",
+ "carbide-macros",
+ "carbide-network",
+ "carbide-sqlx-testing",
+ "carbide-uuid",
+ "chrono",
+ "config-version",
+ "eyre",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

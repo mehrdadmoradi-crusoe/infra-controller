@@ -271,7 +271,7 @@ mod tests {
                 vni: Some(42),
                 routing_profile_type: Some("EXTERNAL".to_string()),
             },
-            status: VpcStatus { vni: Some(100) },
+            status: VpcStatus { vni: Some(100), fabric: None },
             metadata: Metadata::new_with_default_name(),
             created: chrono::Utc::now(),
             updated: chrono::Utc::now(),

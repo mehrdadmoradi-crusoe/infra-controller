@@ -122,7 +122,35 @@ impl FabricManager {
                 Err(e) => tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: VPC reconcile failed"),
             }
         }
+        self.gc_orphaned_vrfs(&vpcs).await;
         Ok(ok)
+    }
+
+    /// Tear down fabric VRFs whose NICo VPC no longer exists (or is no longer
+    /// ToR-VRF). This is the delete half of the level-triggered loop: whatever
+    /// dropped out of NICo's intent -- however it dropped out -- is removed from
+    /// the fabric on the next pass. Failures are logged, never fatal, so one bad
+    /// object can't stall the rest.
+    async fn gc_orphaned_vrfs(&self, live: &[Vpc]) {
+        let live_ids: std::collections::HashSet<String> =
+            live.iter().map(|v| v.id.to_string()).collect();
+        let existing = match self.fabric.list_vrfs().await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "fabric-manager: list_vrfs for GC failed");
+                return;
+            }
+        };
+        for (fabric_name, nico_id) in existing {
+            if live_ids.contains(&nico_id) {
+                continue;
+            }
+            tracing::info!(vpc = %fabric_name, nico_id = %nico_id,
+                "fabric-manager: GC tearing down orphaned VRF");
+            if let Err(e) = self.fabric.delete_vrf(&fabric_name).await {
+                tracing::warn!(vpc = %fabric_name, error = %e, "fabric-manager: GC delete_vrf failed");
+            }
+        }
     }
 
     /// All non-deleted VPCs whose virtualization type is ToR-VRF (wire `tor`).
@@ -179,6 +207,33 @@ impl FabricManager {
             dhcp_range: None,
         };
         self.fabric.ensure_vrf(&intent).await?;
+        // Read back what the fabric actually programmed (drift visibility). This is
+        // informational -- a status read failing must not fail the reconcile.
+        match self.fabric.get_vrf_status(&vpc.metadata.name).await {
+            Ok(observed) => {
+                let fabric_status = model::vpc::FabricVrfStatus {
+                    programmed: observed.is_some(),
+                    observed_at: chrono::Utc::now(),
+                    detail: observed,
+                };
+                // Persist what the fabric reports so NICo's VpcStatus reflects the
+                // programmed state (drift visibility for operators/API). Non-fatal:
+                // a status write failing must not fail the reconcile.
+                match self.db.acquire().await {
+                    Ok(mut conn) => {
+                        if let Err(e) =
+                            db::vpc::set_fabric_status(vpc.id, &fabric_status, &mut conn).await
+                        {
+                            tracing::warn!(vpc = %vpc.id, error = %e,
+                                "fabric-manager: persisting fabric status failed");
+                        }
+                    }
+                    Err(e) => tracing::warn!(vpc = %vpc.id, error = %e,
+                        "fabric-manager: acquire for fabric status write failed"),
+                }
+            }
+            Err(e) => tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: get_vrf_status failed"),
+        }
 
         // (b) Attach every placed host whose operator-declared Connection label is
         // set. NICo references the fabric-owned wiring by name; it never invents it.

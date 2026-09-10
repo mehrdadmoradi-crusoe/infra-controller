@@ -94,7 +94,7 @@ async fn create_stretchable_segment_for_svi_test_with_vpc_type(
             routing_profile_type: None,
             vni: None,
         },
-        VpcStatus { vni: None },
+        VpcStatus { vni: None, fabric: None },
         txn.as_mut(),
     )
     .await?;
