@@ -1407,11 +1407,18 @@ async fn initialize_and_start_controllers<'a>(
     // the underlay -- it only emits per-VPC VPC/VPCAttachment/VPCPeering CRDs.
     if carbide_config.fabric.enabled {
         tracing::info!(backend = ?carbide_config.fabric.backend, "Initializing ToR-VRF fabric backend");
-        let fabric_ops: Arc<dyn carbide_fabric::FabricOperations> = Arc::new(
-            carbide_fabric::HedgehogFabric::try_default(&carbide_config.fabric)
-                .await
-                .map_err(|e| eyre::eyre!("Failed to init fabric backend: {e}"))?,
-        );
+        let fabric_ops: Arc<dyn carbide_fabric::FabricOperations> = match carbide_config.fabric.backend {
+            carbide_fabric::FabricBackend::Hedgehog => Arc::new(
+                carbide_fabric::HedgehogFabric::try_default(&carbide_config.fabric)
+                    .await
+                    .map_err(|e| eyre::eyre!("Failed to init Hedgehog fabric backend: {e}"))?,
+            ),
+            carbide_fabric::FabricBackend::Eda => Arc::new(
+                carbide_fabric::EdaFabric::try_default(&carbide_config.fabric)
+                    .await
+                    .map_err(|e| eyre::eyre!("Failed to init EDA fabric backend: {e}"))?,
+            ),
+        };
         carbide_fabric_manager::FabricManager::new(
             fabric_ops,
             db_pool.clone(),

@@ -17,6 +17,9 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+
+pub mod eda;
+pub use eda::EdaFabric;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams,
 };
