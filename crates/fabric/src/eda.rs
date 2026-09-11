@@ -248,7 +248,13 @@ impl EdaFabric {
         // Every PUT is an EDA transaction, so skip it when nothing would change:
         // the level-triggered reconcile calls this every interval.
         if let Some(cur) = &current {
-            let same_spec = cur.get("spec") == body.get("spec");
+            // EDA fills in server-side defaults on read (e.g. `ipMTU` on an
+            // IRBInterface), so compare only the fields NICo actually sets:
+            // a strict equality would PUT on every pass and never converge.
+            let same_spec = match (cur.get("spec").and_then(|s| s.as_object()), spec.as_object()) {
+                (Some(cur_spec), Some(want)) => want.iter().all(|(k, v)| cur_spec.get(k) == Some(v)),
+                _ => cur.get("spec") == Some(&spec),
+            };
             let same_labels = cur
                 .pointer("/metadata/labels")
                 .map(|l| labels.iter().all(|(k, v)| l.get(k).and_then(|x| x.as_str()) == Some(v)))
@@ -333,6 +339,13 @@ impl EdaFabric {
         l
     }
 
+    /// BridgeDomain name derived from the Router name; kept distinct because both
+    /// become SR Linux network-instances (see `ensure_vrf`). Stays within 63 chars.
+    fn bd_name(router_name: &str) -> String {
+        let base: String = router_name.chars().take(60).collect();
+        format!("{base}-bd")
+    }
+
     /// `10.0.20.1` + `10.0.20.0/24` -> `10.0.20.1/24`.
     fn gateway_prefix(gateway: &str, subnet_cidr: &str) -> Result<String, FabricError> {
         let len = subnet_cidr
@@ -347,6 +360,10 @@ impl EdaFabric {
 impl FabricOperations for EdaFabric {
     async fn ensure_vrf(&self, intent: &VrfIntent) -> Result<(), FabricError> {
         let name = Self::eda_name(&intent.name);
+        // SR Linux renders both a Router (ip-vrf) and a BridgeDomain (mac-vrf) as
+        // a `network-instance` keyed by the EDA object name, so the two must not
+        // share one: the leaf rejects the config with a type conflict otherwise.
+        let bd_name = Self::bd_name(&name);
         let labels = Self::nico_labels(&intent.nico_vpc_id, intent.vni);
         let encap = serde_json::json!({
             "vxlan": { "vniPool": VNI_POOL, "tunnelIndexPool": TUNNEL_INDEX_POOL }
@@ -366,7 +383,7 @@ impl FabricOperations for EdaFabric {
             "eviPool": EVI_POOL,
         })).await?;
 
-        self.upsert(SERVICES_GV, "BridgeDomain", "bridgedomains", &name, &labels, serde_json::json!({
+        self.upsert(SERVICES_GV, "BridgeDomain", "bridgedomains", &bd_name, &labels, serde_json::json!({
             "type": "EVPNVXLAN",
             "description": format!("NICo subnet {} of {}", intent.subnet_cidr, intent.name),
             "encapOptions": encap,
@@ -375,7 +392,7 @@ impl FabricOperations for EdaFabric {
         })).await?;
 
         self.upsert(SERVICES_GV, "IRBInterface", "irbinterfaces", &name, &labels, serde_json::json!({
-            "bridgeDomain": name,
+            "bridgeDomain": bd_name,
             "router": name,
             "description": format!("NICo gateway {} for {}", intent.gateway, intent.name),
             "ipAddresses": [ {
@@ -390,7 +407,7 @@ impl FabricOperations for EdaFabric {
         // Host-facing VLAN: binds every Interface labelled for this VPC. Hosts are
         // added by attach_host, which sets that label.
         self.upsert(SERVICES_GV, "VLAN", "vlans", &name, &labels, serde_json::json!({
-            "bridgeDomain": name,
+            "bridgeDomain": bd_name,
             "vlanID": intent.vlan.to_string(),
             "interfaceSelectors": [ format!("{VPC_LABEL}={name}") ],
             "description": format!("NICo VLAN {} for {}", intent.vlan, intent.name),
@@ -453,9 +470,15 @@ impl FabricOperations for EdaFabric {
                 self.label_interface(n, None).await?;
             }
         }
-        for (kind, plural) in [("VLAN", "vlans"), ("IRBInterface", "irbinterfaces"), ("BridgeDomain", "bridgedomains"), ("Router", "routers")] {
-            tracing::debug!(kind, name = %name, "fabric(eda): delete");
-            self.delete(SERVICES_GV, plural, &name).await?;
+        let bd_name = Self::bd_name(&name);
+        for (kind, plural, obj) in [
+            ("VLAN", "vlans", &name),
+            ("IRBInterface", "irbinterfaces", &name),
+            ("BridgeDomain", "bridgedomains", &bd_name),
+            ("Router", "routers", &name),
+        ] {
+            tracing::debug!(kind, name = %obj, "fabric(eda): delete");
+            self.delete(SERVICES_GV, plural, obj).await?;
         }
         Ok(())
     }
