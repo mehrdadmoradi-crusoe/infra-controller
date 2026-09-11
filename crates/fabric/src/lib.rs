@@ -34,6 +34,10 @@ pub enum FabricError {
     Serde(#[from] serde_json::Error),
     #[error("invalid fabric intent: {0}")]
     Invalid(String),
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("eda api error: {0}")]
+    Eda(String),
 }
 
 /// Off by default, exactly like `DpfConfig`. Enabling this is what makes NICo
@@ -45,9 +49,13 @@ pub struct FabricConfig {
     /// Fabric-controller namespace the CRDs are applied into.
     #[serde(default = "default_namespace")]
     pub namespace: String,
-    /// Which K8s-native fabric controller backs this (Hedgehog today).
+    /// Which fabric controller backs this (Hedgehog via the cluster API, or EDA
+    /// via its own API server).
     #[serde(default)]
     pub backend: FabricBackend,
+    /// EDA connection details; required when `backend = "eda"`.
+    #[serde(default)]
+    pub eda: Option<eda::EdaConfig>,
 }
 
 fn default_namespace() -> String {
@@ -56,7 +64,7 @@ fn default_namespace() -> String {
 
 impl Default for FabricConfig {
     fn default() -> Self {
-        Self { enabled: false, namespace: default_namespace(), backend: FabricBackend::default() }
+        Self { enabled: false, namespace: default_namespace(), backend: FabricBackend::default(), eda: None }
     }
 }
 

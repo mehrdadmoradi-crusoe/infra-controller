@@ -1897,6 +1897,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "mockall",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

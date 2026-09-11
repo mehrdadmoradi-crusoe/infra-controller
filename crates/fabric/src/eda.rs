@@ -2,16 +2,19 @@
 //!
 //! Second implementation of [`FabricOperations`], behind the same six-call
 //! interface as the Hedgehog backend, to prove the model is controller-neutral.
-//! EDA is Kubernetes-native: its stock `services.eda.nokia.com/v2` resources are
-//! applied through the cluster API and EDA's config engine renders them into SR
-//! Linux (or other) device configuration. NICo writes only tenant-level objects
-//! and never touches nodes, topology or underlay.
 //!
-//! Mapping of one NICo isolation domain (VPC) onto EDA:
+//! EDA exposes its own Kubernetes-style REST API (`/apps/<group>/<version>/
+//! namespaces/<ns>/<resource>`), authenticated with a Keycloak bearer token.
+//! Objects written straight to the cluster's Kubernetes API are *not* imported
+//! by EDA's config engine for these kinds ("k8s import disabled"), so this
+//! backend talks to the EDA API server and every write becomes an EDA
+//! transaction that the engine renders into SR Linux configuration.
+//!
+//! Mapping of one NICo isolation domain (VPC) onto EDA's stock services app:
 //!
 //! | NICo intent            | EDA resource(s)                                      |
 //! |------------------------|------------------------------------------------------|
-//! | VRF                    | `Router` (EVPN-VXLAN IP-VRF)                         |
+//! | VRF                    | `Router` (EVPN-VXLAN IP-VRF, NICo's VNI as L3 VNI)    |
 //! | subnet + gateway       | `BridgeDomain` + `IRBInterface` (anycast gateway)    |
 //! | VLAN on host ports     | `VLAN` selecting interfaces labelled for this VPC    |
 //! | host attach            | label `nico.io/vpc=<vrf>` on the host's `Interface`  |
@@ -20,125 +23,291 @@
 //! The one place this touches a fabric-owned object is the label on `Interface`
 //! (metadata only, never `spec`): EDA's `VLAN` binds ports through label
 //! selectors, so a per-VPC label is the idiomatic hook. That is a decision to
-//! confirm with the network team; the alternative is per-port `BridgeInterface`
-//! objects once the EDA version in use supports a VLAN id on them.
+//! confirm with the network team.
 //!
 //! VPC-to-VPC peering is not implemented here yet: EDA models VRF route leaking
-//! through routing policies against the default router, not as a permit list
-//! between two VRFs. `peer_vpcs` returns an explicit error so the reconcile logs
-//! it and carries on with everything else.
+//! through routing policies, not as a permit list between two VRFs. `peer_vpcs`
+//! returns an explicit error so the reconcile logs it and carries on.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use kube::api::{
-    Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams,
-};
-use kube::Client;
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::{FabricConfig, FabricError, FabricOperations, HostAttachment, VrfIntent};
 
-const EDA_SERVICES_GROUP: &str = "services.eda.nokia.com";
-const EDA_SERVICES_VERSION: &str = "v2";
-const EDA_INTERFACES_GROUP: &str = "interfaces.eda.nokia.com";
-const EDA_INTERFACES_VERSION: &str = "v1";
+const SERVICES_GV: &str = "services.eda.nokia.com/v2";
+const INTERFACES_GV: &str = "interfaces.eda.nokia.com/v1";
 
 /// Label NICo places on a host's EDA `Interface` to bind it into a VRF's VLAN.
-/// One host belongs to exactly one isolation domain, so a single-valued label is
-/// enough.
 pub const VPC_LABEL: &str = "nico.io/vpc";
-/// Traceability labels, same as the Hedgehog backend.
 const NICO_ID_LABEL: &str = "nico.io/vpc-id";
 const NICO_VNI_LABEL: &str = "nico.io/vni";
 
-/// EDA allocation pools the derived objects draw from. These are the names the
-/// EDA services app ships with; a site may override them.
+/// Allocation pools the derived objects draw from (the services app defaults).
 const VNI_POOL: &str = "vni-pool";
 const EVI_POOL: &str = "evi-pool";
 const TUNNEL_INDEX_POOL: &str = "tunnel-index-pool";
 
+/// How to reach the EDA API. Secrets are read from the environment so they never
+/// sit in the site TOML: `NICO_EDA_PASSWORD` and `NICO_EDA_CLIENT_SECRET`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdaConfig {
+    /// Base URL of the EDA API server, e.g. `https://eda-api.eda-system.svc`.
+    pub api_url: String,
+    /// Keycloak user NICo authenticates as.
+    pub username: String,
+    /// Keycloak realm and client used for the password grant.
+    #[serde(default = "EdaConfig::default_realm")]
+    pub realm: String,
+    #[serde(default = "EdaConfig::default_client_id")]
+    pub client_id: String,
+    /// Accept the EDA API's certificate without verification (lab use only).
+    #[serde(default)]
+    pub insecure_skip_tls_verify: bool,
+}
+
+impl EdaConfig {
+    fn default_realm() -> String {
+        "eda".to_string()
+    }
+    fn default_client_id() -> String {
+        "eda".to_string()
+    }
+}
+
+pub const PASSWORD_ENV: &str = "NICO_EDA_PASSWORD";
+pub const CLIENT_SECRET_ENV: &str = "NICO_EDA_CLIENT_SECRET";
+
 #[derive(Clone)]
 pub struct EdaFabric {
-    client: Client,
+    http: reqwest::Client,
+    cfg: EdaConfig,
     namespace: String,
+    password: String,
+    client_secret: String,
+    token: Arc<Mutex<Option<(String, Instant)>>>,
 }
 
 impl std::fmt::Debug for EdaFabric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EdaFabric").field("namespace", &self.namespace).finish()
+        f.debug_struct("EdaFabric")
+            .field("api_url", &self.cfg.api_url)
+            .field("namespace", &self.namespace)
+            .field("username", &self.cfg.username)
+            .finish()
     }
 }
 
-impl EdaFabric {
-    /// Connect with the ambient kube config (`$KUBECONFIG` or in-cluster).
-    pub async fn try_default(cfg: &FabricConfig) -> Result<Self, FabricError> {
-        let client = Client::try_default().await?;
-        Ok(Self { client, namespace: cfg.namespace.clone() })
-    }
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
 
-    pub fn new(client: Client, namespace: String) -> Self {
-        Self { client, namespace }
+impl EdaFabric {
+    /// Build from the site config; needs `[fabric.eda]` plus the two env secrets.
+    pub async fn try_default(cfg: &FabricConfig) -> Result<Self, FabricError> {
+        let eda = cfg
+            .eda
+            .clone()
+            .ok_or_else(|| FabricError::Invalid("[fabric.eda] is required for backend = \"eda\"".into()))?;
+        let password = std::env::var(PASSWORD_ENV)
+            .map_err(|_| FabricError::Invalid(format!("{PASSWORD_ENV} is not set")))?;
+        let client_secret = std::env::var(CLIENT_SECRET_ENV)
+            .map_err(|_| FabricError::Invalid(format!("{CLIENT_SECRET_ENV} is not set")))?;
+        let http = reqwest::Client::builder()
+            .danger_accept_invalid_certs(eda.insecure_skip_tls_verify)
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        let me = Self {
+            http,
+            cfg: eda,
+            namespace: cfg.namespace.clone(),
+            password,
+            client_secret,
+            token: Arc::new(Mutex::new(None)),
+        };
+        // Fail fast at startup if EDA is unreachable or the credentials are wrong.
+        me.token(true).await?;
+        Ok(me)
     }
 
     /// Name shared by the Router, BridgeDomain, IRBInterface and VLAN derived for
-    /// one NICo VPC. Prefixed so NICo-owned objects are recognisable next to the
-    /// network team's own services; kept within Kubernetes' 63-char label limit
-    /// because the same string is used as the interface label value.
+    /// one NICo VPC; also used as the interface label value (≤ 63 chars).
     pub fn eda_name(nico_name: &str) -> String {
+        if nico_name.starts_with("nico-") {
+            return nico_name.to_string();
+        }
         let cleaned: String = nico_name
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
             .collect();
-        let cleaned = cleaned.trim_matches('-');
-        let mut name = format!("nico-{cleaned}");
+        let mut name = format!("nico-{}", cleaned.trim_matches('-'));
         name.truncate(63);
         name.trim_end_matches('-').to_string()
     }
 
-    fn services_api(&self, kind: &str) -> Api<DynamicObject> {
-        let gvk = GroupVersionKind::gvk(EDA_SERVICES_GROUP, EDA_SERVICES_VERSION, kind);
-        Api::namespaced_with(self.client.clone(), &self.namespace, &ApiResource::from_gvk(&gvk))
-    }
-
-    fn interfaces_api(&self) -> Api<DynamicObject> {
-        let gvk = GroupVersionKind::gvk(EDA_INTERFACES_GROUP, EDA_INTERFACES_VERSION, "Interface");
-        Api::namespaced_with(self.client.clone(), &self.namespace, &ApiResource::from_gvk(&gvk))
-    }
-
-    async fn apply_service(
-        &self,
-        kind: &str,
-        name: &str,
-        labels: BTreeMap<String, String>,
-        spec: serde_json::Value,
-    ) -> Result<(), FabricError> {
-        let gvk = GroupVersionKind::gvk(EDA_SERVICES_GROUP, EDA_SERVICES_VERSION, kind);
-        let ar = ApiResource::from_gvk(&gvk);
-        let mut obj = DynamicObject::new(name, &ar).within(&self.namespace);
-        obj.metadata.labels = Some(labels);
-        obj.data = serde_json::json!({ "spec": spec });
-        self.services_api(kind)
-            .patch(name, &PatchParams::apply("carbide-fabric").force(), &Patch::Apply(&obj))
+    async fn token(&self, force: bool) -> Result<String, FabricError> {
+        let mut guard = self.token.lock().await;
+        if !force {
+            if let Some((t, exp)) = guard.as_ref() {
+                if Instant::now() < *exp {
+                    return Ok(t.clone());
+                }
+            }
+        }
+        let url = format!(
+            "{}/core/httpproxy/v1/keycloak/realms/{}/protocol/openid-connect/token",
+            self.cfg.api_url.trim_end_matches('/'),
+            self.cfg.realm
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .form(&[
+                ("grant_type", "password"),
+                ("scope", "openid"),
+                ("client_id", self.cfg.client_id.as_str()),
+                ("client_secret", self.client_secret.as_str()),
+                ("username", self.cfg.username.as_str()),
+                ("password", self.password.as_str()),
+            ])
+            .send()
             .await?;
-        Ok(())
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(FabricError::Eda(format!("token request failed: {s}: {body}")));
+        }
+        let tr: TokenResponse = resp.json().await?;
+        // Refresh a minute early; EDA tokens are short-lived.
+        let ttl = tr.expires_in.unwrap_or(300).saturating_sub(60).max(30);
+        *guard = Some((tr.access_token.clone(), Instant::now() + Duration::from_secs(ttl)));
+        Ok(tr.access_token)
     }
 
-    /// Delete one service object; a 404 is success (idempotent).
-    async fn delete_service(&self, kind: &str, name: &str) -> Result<(), FabricError> {
-        match self.services_api(kind).delete(name, &DeleteParams::default()).await {
-            Ok(_) => Ok(()),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
-            Err(e) => Err(e.into()),
+    fn url(&self, gv: &str, plural: &str, name: Option<&str>) -> String {
+        let base = format!(
+            "{}/apps/{gv}/namespaces/{}/{plural}",
+            self.cfg.api_url.trim_end_matches('/'),
+            self.namespace
+        );
+        match name {
+            Some(n) => format!("{base}/{n}"),
+            None => base,
         }
     }
 
-    /// Set or clear the per-VPC label on a fabric-owned `Interface`. Metadata-only
-    /// merge patch: `spec` is never touched.
-    async fn label_interface(&self, interface: &str, vpc: Option<&str>) -> Result<(), FabricError> {
-        let patch = serde_json::json!({ "metadata": { "labels": { VPC_LABEL: vpc } } });
-        self.interfaces_api()
-            .patch(interface, &PatchParams::default(), &Patch::Merge(&patch))
+    /// Send with a bearer token; on 401 refresh the token once and retry.
+    async fn send(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, FabricError> {
+        let tok = self.token(false).await?;
+        let resp = build().bearer_auth(&tok).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let tok = self.token(true).await?;
+            return Ok(build().bearer_auth(&tok).send().await?);
+        }
+        Ok(resp)
+    }
+
+    async fn get(&self, gv: &str, plural: &str, name: &str) -> Result<Option<serde_json::Value>, FabricError> {
+        let url = self.url(gv, plural, Some(name));
+        let resp = self.send(|| self.http.get(&url)).await?;
+        match resp.status() {
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            s if s.is_success() => Ok(Some(resp.json().await?)),
+            s => Err(FabricError::Eda(format!("GET {url}: {s}: {}", resp.text().await.unwrap_or_default()))),
+        }
+    }
+
+    /// Create or replace one object. EDA has no server-side apply: POST if the
+    /// object is absent, PUT (full replace) if present. Both are one transaction.
+    async fn upsert(
+        &self,
+        gv: &str,
+        kind: &str,
+        plural: &str,
+        name: &str,
+        labels: &BTreeMap<String, String>,
+        spec: serde_json::Value,
+    ) -> Result<(), FabricError> {
+        let body = serde_json::json!({
+            "apiVersion": gv,
+            "kind": kind,
+            "metadata": { "name": name, "namespace": self.namespace, "labels": labels },
+            "spec": spec,
+        });
+        let exists = self.get(gv, plural, name).await?.is_some();
+        let url = if exists { self.url(gv, plural, Some(name)) } else { self.url(gv, plural, None) };
+        let resp = self
+            .send(|| {
+                let rb = if exists { self.http.put(&url) } else { self.http.post(&url) };
+                rb.json(&body)
+            })
             .await?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            return Err(FabricError::Eda(format!(
+                "{} {kind}/{name}: {s}: {}",
+                if exists { "PUT" } else { "POST" },
+                resp.text().await.unwrap_or_default()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, gv: &str, plural: &str, name: &str) -> Result<(), FabricError> {
+        let url = self.url(gv, plural, Some(name));
+        let resp = self.send(|| self.http.delete(&url)).await?;
+        match resp.status() {
+            reqwest::StatusCode::NOT_FOUND => Ok(()),
+            s if s.is_success() => Ok(()),
+            s => Err(FabricError::Eda(format!("DELETE {url}: {s}: {}", resp.text().await.unwrap_or_default()))),
+        }
+    }
+
+    async fn list(&self, gv: &str, plural: &str, label_selector: &str) -> Result<Vec<serde_json::Value>, FabricError> {
+        let url = self.url(gv, plural, None);
+        let resp = self
+            .send(|| self.http.get(&url).query(&[("labelSelector", label_selector)]))
+            .await?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            return Err(FabricError::Eda(format!("LIST {url}: {s}: {}", resp.text().await.unwrap_or_default())));
+        }
+        let v: serde_json::Value = resp.json().await?;
+        Ok(v.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default())
+    }
+
+    /// Set or clear the per-VPC label on a fabric-owned `Interface`. JSON Patch on
+    /// metadata only; `spec` is never touched. The label key's `/` is escaped
+    /// as `~1` per RFC 6901.
+    async fn label_interface(&self, interface: &str, vpc: Option<&str>) -> Result<(), FabricError> {
+        let path = format!("/metadata/labels/{}", VPC_LABEL.replace('/', "~1"));
+        let patch = match vpc {
+            Some(v) => serde_json::json!([{ "op": "add", "path": path, "value": v }]),
+            None => serde_json::json!([{ "op": "remove", "path": path }]),
+        };
+        let url = self.url(INTERFACES_GV, "interfaces", Some(interface));
+        let resp = self
+            .send(|| {
+                self.http
+                    .patch(&url)
+                    .header("Content-Type", "application/json-patch+json")
+                    .body(patch.to_string())
+            })
+            .await?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            return Err(FabricError::Eda(format!("PATCH interface {interface}: {s}: {}", resp.text().await.unwrap_or_default())));
+        }
         Ok(())
     }
 
@@ -151,8 +320,7 @@ impl EdaFabric {
         l
     }
 
-    /// `10.0.20.1` + `10.0.20.0/24` -> `10.0.20.1/24` (the IRB wants the gateway
-    /// address with the subnet's prefix length).
+    /// `10.0.20.1` + `10.0.20.0/24` -> `10.0.20.1/24`.
     fn gateway_prefix(gateway: &str, subnet_cidr: &str) -> Result<String, FabricError> {
         let len = subnet_cidr
             .rsplit_once('/')
@@ -170,84 +338,66 @@ impl FabricOperations for EdaFabric {
         let encap = serde_json::json!({
             "vxlan": { "vniPool": VNI_POOL, "tunnelIndexPool": TUNNEL_INDEX_POOL }
         });
-        // The L3 VNI is NICo's own allocation (the VPC's VNI) so it stays stable
-        // across backends; the L2 VNI for the bridge domain comes from EDA's pool.
+        // The L3 VNI is NICo's own allocation so it stays stable across backends;
+        // the L2 VNI for the bridge domain comes from EDA's pool.
         let mut router_encap = encap.clone();
         if let Some(vni) = intent.vni {
             router_encap["vxlan"]["vni"] = serde_json::json!(vni);
         }
         tracing::info!(vrf = %name, nico_id = %intent.nico_vpc_id, "fabric(eda): ensure_vrf");
 
-        // IP-VRF.
-        self.apply_service(
-            "Router",
-            &name,
-            labels.clone(),
-            serde_json::json!({
-                "type": "EVPNVXLAN",
-                "description": format!("NICo isolation domain {} ({})", intent.name, intent.nico_vpc_id),
-                "encapOptions": router_encap,
-                "eviPool": EVI_POOL,
-            }),
-        )
-        .await?;
+        self.upsert(SERVICES_GV, "Router", "routers", &name, &labels, serde_json::json!({
+            "type": "EVPNVXLAN",
+            "description": format!("NICo isolation domain {} ({})", intent.name, intent.nico_vpc_id),
+            "encapOptions": router_encap,
+            "eviPool": EVI_POOL,
+        })).await?;
 
-        // L2 domain for the (single) HostInband subnet.
-        self.apply_service(
-            "BridgeDomain",
-            &name,
-            labels.clone(),
-            serde_json::json!({
-                "type": "EVPNVXLAN",
-                "description": format!("NICo subnet {} of {}", intent.subnet_cidr, intent.name),
-                "encapOptions": encap,
-                "eviPool": EVI_POOL,
-                "macLearning": { "enabled": true, "agingTimeSeconds": 300 },
-            }),
-        )
-        .await?;
+        self.upsert(SERVICES_GV, "BridgeDomain", "bridgedomains", &name, &labels, serde_json::json!({
+            "type": "EVPNVXLAN",
+            "description": format!("NICo subnet {} of {}", intent.subnet_cidr, intent.name),
+            "encapOptions": encap,
+            "eviPool": EVI_POOL,
+            "macLearning": { "enabled": true, "agingTimeSeconds": 300 },
+        })).await?;
 
-        // Anycast gateway for that subnet inside the VRF.
-        self.apply_service(
-            "IRBInterface",
-            &name,
-            labels.clone(),
-            serde_json::json!({
-                "bridgeDomain": name,
-                "router": name,
-                "description": format!("NICo gateway {} for {}", intent.gateway, intent.name),
-                "ipAddresses": [ {
-                    "ipv4Address": {
-                        "ipPrefix": Self::gateway_prefix(&intent.gateway, &intent.subnet_cidr)?,
-                        "primary": true,
-                        "anycast": true,
-                    }
-                } ],
-            }),
-        )
-        .await?;
+        self.upsert(SERVICES_GV, "IRBInterface", "irbinterfaces", &name, &labels, serde_json::json!({
+            "bridgeDomain": name,
+            "router": name,
+            "description": format!("NICo gateway {} for {}", intent.gateway, intent.name),
+            "ipAddresses": [ {
+                "ipv4Address": {
+                    "ipPrefix": Self::gateway_prefix(&intent.gateway, &intent.subnet_cidr)?,
+                    "primary": true,
+                    "anycast": true,
+                }
+            } ],
+        })).await?;
 
-        // The host-facing VLAN: binds every Interface labelled for this VPC. Hosts
-        // are added by attach_host, which sets that label.
-        self.apply_service(
-            "VLAN",
-            &name,
-            labels,
-            serde_json::json!({
-                "bridgeDomain": name,
-                "vlanID": intent.vlan.to_string(),
-                "interfaceSelectors": [ format!("{VPC_LABEL}={name}") ],
-                "description": format!("NICo VLAN {} for {}", intent.vlan, intent.name),
-            }),
-        )
-        .await
+        // Host-facing VLAN: binds every Interface labelled for this VPC. Hosts are
+        // added by attach_host, which sets that label.
+        self.upsert(SERVICES_GV, "VLAN", "vlans", &name, &labels, serde_json::json!({
+            "bridgeDomain": name,
+            "vlanID": intent.vlan.to_string(),
+            "interfaceSelectors": [ format!("{VPC_LABEL}={name}") ],
+            "description": format!("NICo VLAN {} for {}", intent.vlan, intent.name),
+        })).await
     }
 
     async fn attach_host(&self, att: &HostAttachment) -> Result<(), FabricError> {
         let vrf = Self::eda_name(&att.vpc_name);
         tracing::info!(vrf = %vrf, interface = %att.connection, "fabric(eda): attach_host");
-        // `connection` is the fabric-owned Interface resource the host is cabled to
-        // (e.g. `leaf1-ethernet-1-3`), recorded on the NICo machine from inventory.
+        // `connection` is the fabric-owned Interface the host is cabled to (e.g.
+        // `<leaf>-ethernet-1-40`), recorded on the NICo machine from inventory.
+        // Idempotent: skip the transaction if the label is already right.
+        if let Some(cur) = self.get(INTERFACES_GV, "interfaces", &att.connection).await? {
+            let have = cur.pointer("/metadata/labels").and_then(|l| l.get(VPC_LABEL)).and_then(|v| v.as_str());
+            if have == Some(vrf.as_str()) {
+                return Ok(());
+            }
+        } else {
+            return Err(FabricError::Invalid(format!("interface {} does not exist on the fabric", att.connection)));
+        }
         self.label_interface(&att.connection, Some(&vrf)).await
     }
 
@@ -260,48 +410,39 @@ impl FabricOperations for EdaFabric {
 
     async fn get_vrf_status(&self, vpc_name: &str) -> Result<Option<serde_json::Value>, FabricError> {
         let name = Self::eda_name(vpc_name);
-        match self.services_api("Router").get_opt(&name).await? {
-            Some(o) => Ok(o.data.get("status").cloned()),
-            None => Ok(None),
-        }
+        Ok(self
+            .get(SERVICES_GV, "routers", &name)
+            .await?
+            .and_then(|o| o.get("status").cloned()))
     }
 
     async fn list_vrfs(&self) -> Result<Vec<(String, String)>, FabricError> {
-        let lp = ListParams::default().labels(NICO_ID_LABEL);
         let mut out = Vec::new();
-        for o in self.services_api("Router").list(&lp).await? {
-            let name = o.metadata.name.clone().unwrap_or_default();
+        for o in self.list(SERVICES_GV, "routers", NICO_ID_LABEL).await? {
+            let name = o.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or_default();
             let nico_id = o
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get(NICO_ID_LABEL).cloned())
+                .pointer(&format!("/metadata/labels/{}", NICO_ID_LABEL.replace('/', "~1")))
+                .and_then(|v| v.as_str())
                 .unwrap_or_default();
             if !name.is_empty() && !nico_id.is_empty() {
-                out.push((name, nico_id));
+                out.push((name.to_string(), nico_id.to_string()));
             }
         }
         Ok(out)
     }
 
     async fn delete_vrf(&self, vpc_name: &str) -> Result<(), FabricError> {
-        // `vpc_name` may already be the fabric-side name (from list_vrfs) or the
-        // NICo name; eda_name is idempotent on its own output.
-        let name = if vpc_name.starts_with("nico-") {
-            vpc_name.to_string()
-        } else {
-            Self::eda_name(vpc_name)
-        };
+        let name = Self::eda_name(vpc_name);
         tracing::info!(vrf = %name, "fabric(eda): delete_vrf");
         // Detach hosts first so the VLAN has no members when it goes.
-        let lp = ListParams::default().labels(&format!("{VPC_LABEL}={name}"));
-        for i in self.interfaces_api().list(&lp).await? {
-            if let Some(n) = i.metadata.name.as_deref() {
+        for i in self.list(INTERFACES_GV, "interfaces", &format!("{VPC_LABEL}={name}")).await? {
+            if let Some(n) = i.pointer("/metadata/name").and_then(|v| v.as_str()) {
                 self.label_interface(n, None).await?;
             }
         }
-        for kind in ["VLAN", "IRBInterface", "BridgeDomain", "Router"] {
-            self.delete_service(kind, &name).await?;
+        for (kind, plural) in [("VLAN", "vlans"), ("IRBInterface", "irbinterfaces"), ("BridgeDomain", "bridgedomains"), ("Router", "routers")] {
+            tracing::debug!(kind, name = %name, "fabric(eda): delete");
+            self.delete(SERVICES_GV, plural, &name).await?;
         }
         Ok(())
     }
@@ -315,6 +456,7 @@ mod tests {
     fn eda_name_is_prefixed_and_label_safe() {
         assert_eq!(EdaFabric::eda_name("frontend"), "nico-frontend");
         assert_eq!(EdaFabric::eda_name("OpenAI Training"), "nico-openai-training");
+        assert_eq!(EdaFabric::eda_name("nico-frontend"), "nico-frontend");
         assert!(EdaFabric::eda_name(&"x".repeat(100)).len() <= 63);
     }
 
@@ -322,5 +464,13 @@ mod tests {
     fn gateway_takes_subnet_prefix_length() {
         assert_eq!(EdaFabric::gateway_prefix("10.0.20.1", "10.0.20.0/24").unwrap(), "10.0.20.1/24");
         assert!(EdaFabric::gateway_prefix("10.0.20.1", "10.0.20.0").is_err());
+    }
+
+    #[test]
+    fn eda_config_defaults() {
+        let c: EdaConfig = serde_json::from_str(r#"{"api_url":"https://x","username":"nico"}"#).unwrap();
+        assert_eq!(c.realm, "eda");
+        assert_eq!(c.client_id, "eda");
+        assert!(!c.insecure_skip_tls_verify);
     }
 }
