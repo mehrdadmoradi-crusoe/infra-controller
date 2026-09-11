@@ -244,7 +244,20 @@ impl EdaFabric {
             "metadata": { "name": name, "namespace": self.namespace, "labels": labels },
             "spec": spec,
         });
-        let exists = self.get(gv, plural, name).await?.is_some();
+        let current = self.get(gv, plural, name).await?;
+        // Every PUT is an EDA transaction, so skip it when nothing would change:
+        // the level-triggered reconcile calls this every interval.
+        if let Some(cur) = &current {
+            let same_spec = cur.get("spec") == body.get("spec");
+            let same_labels = cur
+                .pointer("/metadata/labels")
+                .map(|l| labels.iter().all(|(k, v)| l.get(k).and_then(|x| x.as_str()) == Some(v)))
+                .unwrap_or(labels.is_empty());
+            if same_spec && same_labels {
+                return Ok(());
+            }
+        }
+        let exists = current.is_some();
         let url = if exists { self.url(gv, plural, Some(name)) } else { self.url(gv, plural, None) };
         let resp = self
             .send(|| {
