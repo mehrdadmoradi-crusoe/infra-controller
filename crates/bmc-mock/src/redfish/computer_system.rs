@@ -503,7 +503,15 @@ async fn patch_settings(
                 BootOrderMode::ViaSettings => {
                     system_state.set_boot_order_override(new_boot_order);
                 }
-                _ => {
+                // iDRAC applies boot-order changes through the pending Settings
+                // resource and answers with a config job (libredfish's Dell
+                // `set_boot_order_dpu_first` PATCHes Systems/<id>/Settings and
+                // reads the job id from the Location header). Mirror that.
+                BootOrderMode::DellOem => {
+                    system_state.set_boot_order_override(new_boot_order);
+                    return redfish::oem::dell::idrac::create_job_with_location(state);
+                }
+                BootOrderMode::Generic => {
                     return json!("Boot order setup must use ComputerSystem resource")
                         .into_response(StatusCode::BAD_REQUEST);
                 }
