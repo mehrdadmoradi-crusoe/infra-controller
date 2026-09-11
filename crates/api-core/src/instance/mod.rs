@@ -108,9 +108,15 @@ async fn validate_zero_dpu_auto_vpc(
         )));
     }
 
-    if vpc.config.network_virtualization_type != VpcVirtualizationType::Flat {
+    // Zero-DPU hosts attach through their NIC, so any NIC-attached VPC type
+    // qualifies: Flat (operator-programmed ToR) or ToR-VRF (fabric-controller
+    // programmed ToR). Both share Flat's capability profile.
+    if !matches!(
+        vpc.config.network_virtualization_type,
+        VpcVirtualizationType::Flat | VpcVirtualizationType::TorVrf
+    ) {
         return Err(CarbideError::FailedPrecondition(format!(
-            "zero-DPU auto allocation requires a Flat VPC; VPC {} uses {}",
+            "zero-DPU auto allocation requires a NIC-attached VPC (Flat or ToR-VRF); VPC {} uses {}",
             vpc.id, vpc.config.network_virtualization_type
         )));
     }
