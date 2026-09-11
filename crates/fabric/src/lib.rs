@@ -34,7 +34,9 @@ pub enum FabricError {
     Serde(#[from] serde_json::Error),
     #[error("invalid fabric intent: {0}")]
     Invalid(String),
-    #[error("http error: {0}")]
+    /// Debug formatting keeps the cause chain (DNS, connect, TLS), which the
+    /// Display form of reqwest errors drops.
+    #[error("http error: {0:?}")]
     Http(#[from] reqwest::Error),
     #[error("eda api error: {0}")]
     Eda(String),

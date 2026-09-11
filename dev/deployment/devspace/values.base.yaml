@@ -118,7 +118,15 @@ nico-api:
       [fabric]
       enabled = true
       backend = "eda"
-      namespace = "ej-site1"
+      namespace = "nico-poc"
+
+      # EDA API server (reached through a port-forward from the laptop when NICo
+      # runs in kind). Password and client secret come from the environment:
+      # NICO_EDA_PASSWORD, NICO_EDA_CLIENT_SECRET (see values.local.yaml).
+      [fabric.eda]
+      api_url = "https://192.168.5.2:1443"
+      username = "admin"
+      insecure_skip_tls_verify = true
 
       [fabric_manager]
       run_interval = 30
