@@ -154,6 +154,14 @@ impl DellPowerEdgeR750<'_> {
                     BootOptionKind::Network,
                 )
             })
+            // One HTTP boot option per embedded (LOM) port, so a zero-DPU host
+            // whose boot NIC is embedded can be put first in the boot order.
+            .chain([1, 2].into_iter().map(|port| {
+                (
+                    format!("HTTP Device 1: {}", Self::embedded_nic_description(port)),
+                    BootOptionKind::Network,
+                )
+            }))
             .chain(std::iter::once((
                 "PCIe SSD in Slot 2 in Bay 1: EFI Fixed Disk Boot Device 1".to_string(),
                 BootOptionKind::Disk,
@@ -217,6 +225,12 @@ impl DellPowerEdgeR750<'_> {
         }
     }
 
+    /// iDRAC's DeviceDescription for an embedded (LOM) port, shared by the
+    /// NetworkDeviceFunction OEM data and the matching HTTP boot option.
+    fn embedded_nic_description(port: u8) -> String {
+        format!("Embedded NIC 1 Port {port} Partition 1")
+    }
+
     pub fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
         let chassis_id = "System.Embedded.1";
         let net_adapter_builder = |id: &str| {
@@ -224,9 +238,55 @@ impl DellPowerEdgeR750<'_> {
                 chassis_id, id,
             ))
         };
+        // The embedded (LOM) adapter carries one NetworkDeviceFunction per port,
+        // mirroring the `NIC.Embedded.{port}-1-1` EthernetInterfaces in
+        // `system_config`. libredfish resolves a host's boot NIC through
+        // Chassis/NetworkAdapters/*/NetworkDeviceFunctions (by MAC, then by id);
+        // without these a zero-DPU host, whose boot NIC is embedded, never gets
+        // past SetBootOrder ("could not find network device function").
+        let embedded_adapter_id = "NIC.Embedded.1";
+        let embedded_functions = [
+            (1, self.embedded_nic.port_1),
+            (2, self.embedded_nic.port_2),
+        ]
+        .into_iter()
+        .map(|(port, mac)| {
+            let function_id = format!("NIC.Embedded.{port}-1-1");
+            redfish::network_device_function::builder(
+                &redfish::network_device_function::chassis_resource(
+                    chassis_id,
+                    embedded_adapter_id,
+                    &function_id,
+                ),
+            )
+            .ethernet(json!({"MACAddress": mac}))
+            // Dell's DeviceDescription for a LOM port; libredfish turns it into
+            // the boot option name "HTTP Device 1: <DeviceDescription>", which
+            // must exist in `system_config`'s BootOptions.
+            .oem(json!({
+                "Dell": {
+                    "@odata.type": "#DellOem.v1_3_0.DellOemResources",
+                    "DellNIC": {
+                        "Id": function_id,
+                        "SerialNumber": format!("EMB{}", mac.to_string().replace(':', "")),
+                        "DeviceDescription": Self::embedded_nic_description(port),
+                    }
+                }
+            }))
+            .build()
+        })
+        .collect();
         let network_adapters = std::iter::once(
-            net_adapter_builder("NIC.Embedded.1")
+            net_adapter_builder(embedded_adapter_id)
                 .manufacturer("Broadcom Inc. and subsidiaries")
+                .network_device_functions(
+                    &redfish::network_device_function::chassis_collection(
+                        chassis_id,
+                        embedded_adapter_id,
+                    ),
+                    embedded_functions,
+                )
+                .status(redfish::resource::Status::Ok)
                 .build(),
         )
         .chain(self.nics.iter().map(|(slot, nic)| {
