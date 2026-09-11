@@ -431,6 +431,31 @@ impl FabricOperations for EdaFabric {
         self.label_interface(&att.connection, Some(&vrf)).await
     }
 
+    async fn list_attachments(&self, vpc_name: &str) -> Result<Vec<String>, FabricError> {
+        let vrf = Self::eda_name(vpc_name);
+        Ok(self
+            .list(INTERFACES_GV, "interfaces", &format!("{VPC_LABEL}={vrf}"))
+            .await?
+            .into_iter()
+            .filter_map(|i| i.pointer("/metadata/name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect())
+    }
+
+    async fn detach_host(&self, att: &HostAttachment) -> Result<(), FabricError> {
+        let vrf = Self::eda_name(&att.vpc_name);
+        // Only clear the label if it still points at this VRF: a port that has
+        // since been attached to another VPC must not lose that binding.
+        let Some(cur) = self.get(INTERFACES_GV, "interfaces", &att.connection).await? else {
+            return Ok(());
+        };
+        let have = cur.pointer("/metadata/labels").and_then(|l| l.get(VPC_LABEL)).and_then(|v| v.as_str());
+        if have != Some(vrf.as_str()) {
+            return Ok(());
+        }
+        tracing::info!(vrf = %vrf, interface = %att.connection, "fabric(eda): detach_host");
+        self.label_interface(&att.connection, None).await
+    }
+
     async fn peer_vpcs(&self, a: &str, b: &str) -> Result<(), FabricError> {
         Err(FabricError::Invalid(format!(
             "VPC peering {a}<->{b} is not implemented on the EDA backend yet \

@@ -249,6 +249,7 @@ impl FabricManager {
             },
         )
         .await?;
+        let mut desired_connections: std::collections::HashSet<String> = std::collections::HashSet::new();
         for id in instance_ids {
             let Some(inst) = db::instance::find_by_id(&self.db, id).await? else {
                 continue;
@@ -273,6 +274,25 @@ impl FabricManager {
                     connection: connection.clone(),
                 })
                 .await?;
+            desired_connections.insert(connection.clone());
+        }
+        // (b') Detach ports whose instance is gone. Same level-triggered shape as
+        // GC: whatever the fabric has bound to this VRF that NICo no longer places
+        // is removed on the next pass. A listing failure only skips the detach.
+        match self.fabric.list_attachments(&vpc.metadata.name).await {
+            Ok(bound) => {
+                for connection in bound.into_iter().filter(|c| !desired_connections.contains(c)) {
+                    tracing::info!(vpc = %vpc.id, %connection,
+                        "fabric-manager: detaching port with no placed instance");
+                    self.fabric
+                        .detach_host(&HostAttachment {
+                            vpc_name: vpc.metadata.name.clone(),
+                            connection,
+                        })
+                        .await?;
+                }
+            }
+            Err(e) => tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: list_attachments failed; skipping detach"),
         }
 
         // (c) Peer with other fabric-managed (TorVrf) VPCs. NICo programs peering

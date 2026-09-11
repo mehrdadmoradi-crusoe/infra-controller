@@ -138,6 +138,9 @@ async fn reconciles_vrf_and_peering(pool: sqlx::PgPool) -> eyre::Result<()> {
         .returning(|_, _| Ok(()));
     // no instances placed -> no host attachment.
     fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    // nothing bound on the fabric either -> nothing to detach.
+    fabric.expect_list_attachments().returning(|_| Ok(vec![]));
+    fabric.expect_detach_host().times(0).returning(|_| Ok(()));
     // The fabric reports a status object -> the reconcile must persist it on the
     // VPC as `programmed` (asserted below).
     fabric
@@ -239,6 +242,11 @@ async fn attaches_host_from_connection_label(pool: sqlx::PgPool) -> eyre::Result
         .withf(|a: &HostAttachment| a.vpc_name == "tor-a" && a.connection == "leaf01/Ethernet1")
         .times(1)
         .returning(|_| Ok(()));
+    // The fabric already binds exactly that port -> nothing to detach.
+    fabric
+        .expect_list_attachments()
+        .returning(|_| Ok(vec!["leaf01/Ethernet1".to_string()]));
+    fabric.expect_detach_host().times(0).returning(|_| Ok(()));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
     let vpcs = mgr.list_tor_vrf_vpcs().await?;
@@ -323,11 +331,47 @@ async fn fabric_errors_are_isolated_and_not_fatal(pool: sqlx::PgPool) -> eyre::R
     // GC can't list the fabric either: it must degrade to a no-op, not fail the pass.
     fabric.expect_list_vrfs().returning(move || Err(unreachable()));
     fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    // nothing bound on the fabric either -> nothing to detach.
+    fabric.expect_list_attachments().returning(|_| Ok(vec![]));
+    fabric.expect_detach_host().times(0).returning(|_| Ok(()));
     fabric.expect_delete_vrf().times(0).returning(|_| Ok(()));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
     // No panic, no Err out of the pass: the healthy tenant counts, the failed one
     // is logged and skipped, and GC is skipped when the fabric can't be listed.
     assert_eq!(mgr.run_single_iteration().await?, 1);
+    Ok(())
+}
+
+#[carbide_macros::sqlx_test]
+async fn detaches_port_whose_instance_is_gone(pool: sqlx::PgPool) -> eyre::Result<()> {
+    // A ToR-VRF VPC with a ready segment but no placed instance, while the fabric
+    // still binds a port into its VRF (the instance was released): the reconcile
+    // must detach that port and nothing else.
+    let mut txn = pool.begin().await?;
+    let vpc = seed_tor_vpc(&mut txn, "tor-a", Some(10001)).await?;
+    seed_hostinband_segment(&mut txn, vpc, 100, "10.10.0.0/24", "10.10.0.1").await?;
+    txn.commit().await?;
+
+    let mut fabric = MockFabricOperations::new();
+    fabric.expect_ensure_vrf().returning(|_| Ok(()));
+    fabric.expect_get_vrf_status().returning(|_| Ok(None));
+    fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    fabric
+        .expect_list_attachments()
+        .withf(|v: &str| v == "tor-a")
+        .returning(|_| Ok(vec!["leaf01/Ethernet1".to_string()]));
+    fabric
+        .expect_detach_host()
+        .withf(|a: &HostAttachment| a.vpc_name == "tor-a" && a.connection == "leaf01/Ethernet1")
+        .times(1)
+        .returning(|_| Ok(()));
+
+    let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
+    for v in &mgr.list_tor_vrf_vpcs().await? {
+        mgr.reconcile_vpc(v)
+            .await
+            .map_err(|e| eyre::eyre!("reconcile {} failed: {e}", v.metadata.name))?;
+    }
     Ok(())
 }

@@ -1535,13 +1535,18 @@ impl ApiClient {
                     CarbideCliError::GenericError(format!("VPC {vpc_id} was not found"))
                 })?;
 
-            let VpcVirtualizationType::Flat = vpc.network_virtualization_type() else {
+            // Zero-DPU auto allocation works for any NIC-attached VPC type: Flat
+            // (operator-programmed ToR) or ToR-VRF (fabric-controller programmed).
+            if !matches!(
+                vpc.network_virtualization_type(),
+                VpcVirtualizationType::Flat | VpcVirtualizationType::Tor
+            ) {
                 return Err(CarbideCliError::GenericError(format!(
-                    "VPC {} is not a flat VPC, is of type {}",
+                    "VPC {} is not a NIC-attached (flat or ToR-VRF) VPC, is of type {}",
                     vpc_id,
                     vpc.network_virtualization_type().as_str_name()
                 )));
-            };
+            }
 
             (
                 Vec::new(),

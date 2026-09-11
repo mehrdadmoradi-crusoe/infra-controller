@@ -112,6 +112,12 @@ pub trait FabricOperations: Send + Sync + std::fmt::Debug {
     async fn ensure_vrf(&self, intent: &VrfIntent) -> Result<(), FabricError>;
     /// Bind a host port into the VRF (Hedgehog `VPCAttachment`).
     async fn attach_host(&self, att: &HostAttachment) -> Result<(), FabricError>;
+    /// The host ports currently bound into a VRF on the fabric, as the
+    /// `connection` names `attach_host` was called with. Lets the reconcile
+    /// detach ports whose instance is gone (level-triggered, like GC).
+    async fn list_attachments(&self, vpc_name: &str) -> Result<Vec<String>, FabricError>;
+    /// Unbind a host port from the VRF. Idempotent: an absent binding is a no-op.
+    async fn detach_host(&self, att: &HostAttachment) -> Result<(), FabricError>;
     /// Permit east-west between two tenant VPCs (Hedgehog `VPCPeering`).
     async fn peer_vpcs(&self, a: &str, b: &str) -> Result<(), FabricError>;
     /// Read back the programmed state of a VRF for reconciliation/status.
@@ -234,6 +240,33 @@ impl FabricOperations for HedgehogFabric {
         });
         tracing::info!(vpc = %vpc, connection = %att.connection, "fabric: attach_host");
         self.apply("VPCAttachment", &name, BTreeMap::new(), spec).await
+    }
+
+    async fn list_attachments(&self, vpc_name: &str) -> Result<Vec<String>, FabricError> {
+        let vpc = Self::hedgehog_vpc_name(vpc_name);
+        let subnet_prefix = format!("{vpc}/");
+        let mut out = Vec::new();
+        for a in self.api("VPCAttachment").list(&ListParams::default()).await? {
+            let spec = a.data.get("spec");
+            let belongs = spec
+                .and_then(|s| s.get("subnet"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.starts_with(&subnet_prefix))
+                .unwrap_or(false);
+            if let (true, Some(conn)) =
+                (belongs, spec.and_then(|s| s.get("connection")).and_then(|v| v.as_str()))
+            {
+                out.push(conn.to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    async fn detach_host(&self, att: &HostAttachment) -> Result<(), FabricError> {
+        let vpc = Self::hedgehog_vpc_name(&att.vpc_name);
+        let name: String = format!("{}--{}", att.connection, vpc).chars().take(253).collect();
+        tracing::info!(vpc = %vpc, connection = %att.connection, "fabric: detach_host");
+        self.delete_obj("VPCAttachment", &name).await
     }
 
     async fn peer_vpcs(&self, a: &str, b: &str) -> Result<(), FabricError> {
