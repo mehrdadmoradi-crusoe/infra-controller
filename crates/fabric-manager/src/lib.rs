@@ -178,6 +178,18 @@ impl FabricManager {
     /// fabric-managed VPCs. Every field has a real source (no invented data);
     /// anything not provisioned yet is skipped so the next pass picks it up
     /// (level-triggered).
+    /// One short-lived pooled connection for one status row. Kept as its own
+    /// function so the connection is never alive across a fabric call.
+    async fn persist_fabric_status(
+        &self,
+        vpc_id: carbide_uuid::vpc::VpcId,
+        status: &model::vpc::FabricVrfStatus,
+    ) -> eyre::Result<()> {
+        let mut conn = self.db.acquire().await?;
+        db::vpc::set_fabric_status(vpc_id, status, &mut conn).await?;
+        Ok(())
+    }
+
     async fn reconcile_vpc(&self, vpc: &Vpc) -> eyre::Result<()> {
         debug_assert_eq!(
             vpc.config.network_virtualization_type,
@@ -230,17 +242,9 @@ impl FabricManager {
                 // Persist what the fabric reports so NICo's VpcStatus reflects the
                 // programmed state (drift visibility for operators/API). Non-fatal:
                 // a status write failing must not fail the reconcile.
-                match self.db.acquire().await {
-                    Ok(mut conn) => {
-                        if let Err(e) =
-                            db::vpc::set_fabric_status(vpc.id, &fabric_status, &mut conn).await
-                        {
-                            tracing::warn!(vpc = %vpc.id, error = %e,
-                                "fabric-manager: persisting fabric status failed");
-                        }
-                    }
-                    Err(e) => tracing::warn!(vpc = %vpc.id, error = %e,
-                        "fabric-manager: acquire for fabric status write failed"),
+                if let Err(e) = self.persist_fabric_status(vpc.id, &fabric_status).await {
+                    tracing::warn!(vpc = %vpc.id, error = %e,
+                        "fabric-manager: persisting fabric status failed");
                 }
             }
             Err(e) => {
