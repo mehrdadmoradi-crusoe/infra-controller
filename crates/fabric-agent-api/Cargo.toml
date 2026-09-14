@@ -1,0 +1,24 @@
+[package]
+name = "carbide-fabric-agent-api"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "carbide_fabric_agent_api"
+
+# The fabric agent contract: the vendor-neutral gRPC service through which NICo
+# hands tenant network intent (VRF, port membership, peering) to a delegated
+# fabric controller. Generated types and service stubs only; no vendor code.
+
+[dependencies]
+prost = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[lints]
+workspace = true

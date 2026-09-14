@@ -1418,6 +1418,18 @@ async fn initialize_and_start_controllers<'a>(
                     .await
                     .map_err(|e| eyre::eyre!("Failed to init EDA fabric backend: {e}"))?,
             ),
+            // Production shape: an out-of-process fabric agent speaking the
+            // fabric_agent.v1 contract. The channel is lazy so an unreachable
+            // agent never blocks nico-api startup; the reconcile reports it per pass.
+            carbide_fabric::FabricBackend::Agent => {
+                let agent_cfg = carbide_config.fabric.agent.as_ref().ok_or_else(|| {
+                    eyre::eyre!("fabric.backend = \"agent\" requires a [fabric.agent] section")
+                })?;
+                Arc::new(
+                    carbide_fabric::GrpcFabricAgent::connect_lazy(agent_cfg)
+                        .map_err(|e| eyre::eyre!("Failed to init fabric agent client: {e}"))?,
+                )
+            }
         };
         carbide_fabric_manager::FabricManager::new(
             fabric_ops,

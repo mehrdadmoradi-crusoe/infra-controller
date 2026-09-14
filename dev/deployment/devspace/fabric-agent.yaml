@@ -1,0 +1,94 @@
+# The fabric agent for the local kind demo: serves the fabric_agent.v1 contract
+# to nico-api and renders it onto Nokia EDA (the simulated nico-poc fabric).
+#
+# This is the production shape running in miniature: nico-api holds no EDA
+# credential and speaks only the contract; the agent holds the EDA credential.
+# In production the agent runs on the network team's infrastructure next to the
+# fabric, with TLS and mTLS; here it runs in the same kind cluster without TLS.
+#
+# Apply with:  kubectl apply -n nico-system -f dev/deployment/devspace/fabric-agent.yaml
+# then pin the image tag:  kubectl set image deploy/fabric-agent -n nico-system fabric-agent=fabric-agent:<tag>
+# and point nico-api at it in values.local.yaml:
+#   [fabric] backend = "agent"  [fabric.agent] endpoint = "http://fabric-agent.nico-system.svc.cluster.local:7443"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fabric-agent-config
+  namespace: nico-system
+data:
+  fabric-agent.toml: |
+    [fabric]
+    enabled = true
+    backend = "eda"
+    namespace = "nico-poc"
+
+    [fabric.eda]
+    api_url = "https://192.168.5.2:1443"
+    username = "admin"
+    insecure_skip_tls_verify = true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fabric-agent
+  namespace: nico-system
+spec:
+  selector:
+    app.kubernetes.io/name: fabric-agent
+  ports:
+    - name: grpc
+      port: 7443
+      targetPort: 7443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fabric-agent
+  namespace: nico-system
+  labels:
+    app.kubernetes.io/name: fabric-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabric-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fabric-agent
+    spec:
+      containers:
+        - name: fabric-agent
+          image: fabric-agent
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/fabric-agent/fabric-agent.toml", "--listen", "0.0.0.0:7443"]
+          env:
+            - name: RUST_LOG
+              value: info
+            # EDA credentials live with the agent, never with nico-api.
+            - name: NICO_EDA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-agent-eda
+                  key: password
+            - name: NICO_EDA_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-agent-eda
+                  key: client_secret
+          ports:
+            - name: grpc
+              containerPort: 7443
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fabric-agent
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 7443
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: fabric-agent-config

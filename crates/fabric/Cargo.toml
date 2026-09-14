@@ -20,6 +20,9 @@ test-support = ["dep:mockall"]
 # VPCPeering/ExternalPeering only.
 
 [dependencies]
+carbide-fabric-agent-api = { path = "../fabric-agent-api" }
+tonic = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 kube = { default-features = false, features = [
   "client",
   "runtime",

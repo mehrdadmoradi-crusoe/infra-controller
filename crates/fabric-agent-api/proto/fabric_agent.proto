@@ -1,0 +1,205 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+syntax = "proto3";
+
+package fabric_agent.v1;
+
+// The fabric agent contract.
+//
+// NICo owns tenant network intent (VPC, HostInband segment, host placement). A
+// fabric agent renders that intent onto a switching fabric through whatever
+// controller sits behind it (Nokia EDA, Hedgehog, Cumulus NVUE, Netris, ...).
+// The contract carries NICo's vocabulary only: VRF, port, membership, witness,
+// contract, route target. No controller object names or shapes appear here.
+//
+// Invariants every agent implements:
+//   * Every managed port is always in exactly one VRF. The quarantine VRF is the
+//     default home of an unattached port (discovery, PXE, DHCP relay to NICo).
+//     A SetPortMembership with an empty `vrf` means "quarantine".
+//   * Every mutating call is idempotent and carries NICo's request id, which the
+//     agent records on each transaction it makes downstream.
+//   * The agent owns every object it creates and nothing else.
+//   * A membership change into a tenant VRF is refused (FAILED_PRECONDITION)
+//     when the witnesses do not match what the switch observes; into quarantine
+//     it is never refused.
+//   * Anything the agent cannot do is declared in Capabilities and refused with
+//     UNIMPLEMENTED, never silently skipped.
+service FabricAgent {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (Capabilities);
+  rpc EnsureVrf(EnsureVrfRequest) returns (EnsureVrfResponse);
+  rpc DeleteVrf(DeleteVrfRequest) returns (DeleteVrfResponse);
+  rpc ListVrfs(ListVrfsRequest) returns (ListVrfsResponse);
+  rpc SetPortMembership(SetPortMembershipRequest) returns (SetPortMembershipResponse);
+  rpc ListPortMemberships(ListPortMembershipsRequest) returns (ListPortMembershipsResponse);
+  rpc PeerVrfs(PeerVrfsRequest) returns (PeerVrfsResponse);
+  rpc GetVrfStatus(GetVrfStatusRequest) returns (VrfStatus);
+  rpc WatchEvents(WatchEventsRequest) returns (stream FabricEvent);
+}
+
+message GetCapabilitiesRequest {}
+
+// What this agent can do. NICo rejects tenant requests that need an undeclared
+// capability at create time, with the reason, instead of discovering it later.
+message Capabilities {
+  // Semantic version of this contract the agent implements, e.g. "1.0.0".
+  string contract_version = 1;
+  // Free-form adapter identity for status pages and logs, e.g. "eda", "cumulus-nvue".
+  string adapter = 2;
+  bool peering = 3;
+  bool mac_limit = 4;
+  bool ip_source_guard = 5;
+  bool dhcp_snooping = 6;
+  bool storm_control = 7;
+  bool isolated_ports = 8;
+  bool anycast_gateway = 9;
+  // The agent chooses a per-rack VLAN; NICo supplies only the VNI.
+  bool vlan_translation = 10;
+  bool events = 11;
+  bool lldp_witness = 12;
+  bool mac_witness = 13;
+  bool quarantine_vrf = 14;
+}
+
+// A tenant VRF as NICo describes it. Every field is NICo-owned state.
+message VrfSpec {
+  // Agent-facing VRF name; unique per site, derived by NICo from the VPC name.
+  string name = 1;
+  string nico_vpc_id = 2;
+  string subnet_cidr = 3;
+  // VLAN hint for the host-facing segment. Ignored when the agent declares
+  // vlan_translation.
+  uint32 vlan = 4;
+  // Anycast gateway address inside subnet_cidr.
+  string gateway = 5;
+  // L3 VNI allocated by NICo.
+  optional uint32 vni = 6;
+}
+
+message EnsureVrfRequest {
+  VrfSpec vrf = 1;
+  string request_id = 2;
+}
+message EnsureVrfResponse {}
+
+message DeleteVrfRequest {
+  string name = 1;
+  string request_id = 2;
+}
+message DeleteVrfResponse {}
+
+message ListVrfsRequest {}
+message VrfRef {
+  string name = 1;
+  string nico_vpc_id = 2;
+}
+message ListVrfsResponse {
+  repeated VrfRef vrfs = 1;
+}
+
+message LldpNeighbor {
+  string chassis_id = 1;
+  string port_id = 2;
+}
+
+// What NICo expects the switch to observe on the port before it is moved into a
+// tenant VRF. An empty witness set means "do not verify" and is only accepted
+// for moves into quarantine.
+message Witnesses {
+  repeated string expected_macs = 1;
+  LldpNeighbor expected_lldp = 2;
+}
+
+// Host identity the port must enforce once attached. The agent applies what
+// the platform supports and reports it in Enforcement.
+message PortContract {
+  repeated string allowed_macs = 1;
+  repeated string allowed_ips = 2;
+  bool dhcp_snooping = 3;
+  bool storm_control = 4;
+  bool isolated_port = 5;
+}
+
+message Enforcement {
+  bool mac_limit = 1;
+  bool ip_source_guard = 2;
+  bool dhcp_snooping = 3;
+  bool storm_control = 4;
+  bool isolated_port = 5;
+}
+
+message SetPortMembershipRequest {
+  // Fabric-owned port identity (the cabling record's switch port name).
+  string port = 1;
+  // Target VRF name. Empty means quarantine.
+  string vrf = 2;
+  // The VRF the port is leaving, when NICo knows it. Lets adapters without a
+  // port index unbind precisely.
+  string previous_vrf = 3;
+  Witnesses witnesses = 4;
+  PortContract contract = 5;
+  string request_id = 6;
+}
+message SetPortMembershipResponse {
+  Enforcement enforced = 1;
+}
+
+message ListPortMembershipsRequest {
+  // Optional VRF filter; empty lists every managed port.
+  string vrf = 1;
+}
+message PortMembership {
+  string port = 1;
+  // Empty means quarantine.
+  string vrf = 2;
+  Enforcement enforced = 3;
+}
+message ListPortMembershipsResponse {
+  repeated PortMembership memberships = 1;
+}
+
+message PeerVrfsRequest {
+  string a = 1;
+  string b = 2;
+  string request_id = 3;
+}
+message PeerVrfsResponse {}
+
+message GetVrfStatusRequest {
+  string name = 1;
+}
+message VrfStatus {
+  bool present = 1;
+  bool programmed = 2;
+  // Switches carrying the VRF.
+  repeated string nodes = 3;
+  string operational_state = 4;
+  // Adapter-specific status object for operators; NICo persists it opaquely.
+  string raw_json = 5;
+}
+
+message WatchEventsRequest {}
+message FabricEvent {
+  // "vrf_created", "vrf_deleted", "port_moved", "drift_detected", "external_change".
+  string kind = 1;
+  string vrf = 2;
+  string port = 3;
+  // NICo request id that caused the change, or empty when external.
+  string request_id = 4;
+  bool external = 5;
+  string at_rfc3339 = 6;
+  string detail = 7;
+}

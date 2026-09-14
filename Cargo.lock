@@ -1894,6 +1894,7 @@ name = "carbide-fabric"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "carbide-fabric-agent-api",
  "k8s-openapi",
  "kube",
  "mockall",
@@ -1902,7 +1903,38 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "carbide-fabric-agent"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "carbide-fabric",
+ "carbide-fabric-agent-api",
+ "clap",
+ "eyre",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "toml 1.1.2+spec-1.1.0",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "carbide-fabric-agent-api"
+version = "0.0.1"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]

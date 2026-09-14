@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 
+pub mod agent;
 pub mod eda;
+pub use agent::GrpcFabricAgent;
 pub use eda::EdaFabric;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams,
@@ -40,6 +42,15 @@ pub enum FabricError {
     Http(#[from] reqwest::Error),
     #[error("eda api error: {0}")]
     Eda(String),
+    /// The fabric agent refused or failed a call; carries the gRPC status.
+    #[error("fabric agent error: {0}")]
+    Agent(String),
+    /// The backend declared it cannot do this (see `Capabilities`).
+    #[error("fabric backend does not support: {0}")]
+    Unsupported(String),
+    /// Witnesses did not match what the switch observes on the port.
+    #[error("port {port}: witness mismatch: {detail}")]
+    WitnessMismatch { port: String, detail: String },
 }
 
 /// Off by default, exactly like `DpfConfig`. Enabling this is what makes NICo
@@ -58,6 +69,9 @@ pub struct FabricConfig {
     /// EDA connection details; required when `backend = "eda"`.
     #[serde(default)]
     pub eda: Option<eda::EdaConfig>,
+    /// Fabric agent connection details; required when `backend = "agent"`.
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
 }
 
 fn default_namespace() -> String {
@@ -66,7 +80,7 @@ fn default_namespace() -> String {
 
 impl Default for FabricConfig {
     fn default() -> Self {
-        Self { enabled: false, namespace: default_namespace(), backend: FabricBackend::default(), eda: None }
+        Self { enabled: false, namespace: default_namespace(), backend: FabricBackend::default(), eda: None, agent: None }
     }
 }
 
@@ -76,6 +90,118 @@ pub enum FabricBackend {
     #[default]
     Hedgehog,
     Eda,
+    /// An out-of-process fabric agent speaking the `fabric_agent.v1` contract
+    /// (see `carbide-fabric-agent-api`). This is the production shape: the
+    /// network team runs the agent next to the fabric and holds the controller
+    /// credentials; NICo holds only its client identity.
+    Agent,
+}
+
+/// Connection details for `FabricBackend::Agent`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// gRPC endpoint, e.g. `https://fabric-agent.net.example:7443`.
+    pub endpoint: String,
+    /// PEM CA bundle that signs the agent's server certificate. Required for
+    /// `https` endpoints unless `insecure_skip_tls_verify` is set.
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    /// Client certificate and key (PEM) for mTLS to the agent.
+    #[serde(default)]
+    pub client_cert_file: Option<String>,
+    #[serde(default)]
+    pub client_key_file: Option<String>,
+    /// Development only.
+    #[serde(default)]
+    pub insecure_skip_tls_verify: bool,
+    /// Per-call deadline.
+    #[serde(default = "AgentConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl AgentConfig {
+    const fn default_timeout_secs() -> u64 {
+        30
+    }
+}
+
+/// What a fabric backend can do. Mirrors `fabric_agent.v1.Capabilities`; the
+/// reconcile rejects intent that needs an undeclared capability instead of
+/// discovering the gap on the switch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    pub contract_version: String,
+    pub adapter: String,
+    pub peering: bool,
+    pub mac_limit: bool,
+    pub ip_source_guard: bool,
+    pub dhcp_snooping: bool,
+    pub storm_control: bool,
+    pub isolated_ports: bool,
+    pub anycast_gateway: bool,
+    pub vlan_translation: bool,
+    pub events: bool,
+    pub lldp_witness: bool,
+    pub mac_witness: bool,
+    pub quarantine_vrf: bool,
+}
+
+impl Capabilities {
+    /// What the in-process adapters written before the contract can honestly
+    /// claim: VRF lifecycle, label-based port binding, anycast gateway. No
+    /// witnesses, no port contracts, no quarantine VRF yet.
+    pub fn legacy(adapter: &str, peering: bool) -> Self {
+        Self {
+            contract_version: "0.9.0".to_string(),
+            adapter: adapter.to_string(),
+            peering,
+            anycast_gateway: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// What NICo expects the switch to observe on a port before it is moved into a
+/// tenant VRF. Empty means "do not verify", which is only accepted for moves
+/// into quarantine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Witnesses {
+    pub expected_macs: Vec<String>,
+    /// (chassis id, port id) the host reported over LLDP during discovery.
+    pub expected_lldp: Option<(String, String)>,
+}
+
+/// Host identity the port must enforce once attached.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortContract {
+    pub allowed_macs: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    pub dhcp_snooping: bool,
+    pub storm_control: bool,
+    pub isolated_port: bool,
+}
+
+/// What the backend actually enforced for a port contract.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Enforcement {
+    pub mac_limit: bool,
+    pub ip_source_guard: bool,
+    pub dhcp_snooping: bool,
+    pub storm_control: bool,
+    pub isolated_port: bool,
+}
+
+/// One port's desired membership. `vrf == None` means quarantine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortMembership {
+    /// Fabric-owned port identity (the cabling record's switch port name).
+    pub port: String,
+    pub vrf: Option<String>,
+    /// The VRF the port is leaving, when known. Lets adapters that keep no port
+    /// index unbind precisely.
+    pub previous_vrf: Option<String>,
+    pub witnesses: Witnesses,
+    pub contract: PortContract,
 }
 
 /// The tenant VRF/VPC intent NICo hands to the fabric backend. NICo already owns
@@ -128,6 +254,43 @@ pub trait FabricOperations: Send + Sync + std::fmt::Debug {
     /// Tear down a tenant VRF and everything attached to it (VPCAttachments +
     /// VPCPeerings + the VPC). Idempotent: deleting an absent object is a no-op.
     async fn delete_vrf(&self, vpc_name: &str) -> Result<(), FabricError>;
+
+    /// What this backend can do. In-process adapters written before the
+    /// contract report `Capabilities::legacy`; the gRPC agent asks the agent.
+    async fn capabilities(&self) -> Result<Capabilities, FabricError> {
+        Ok(Capabilities::legacy("legacy", true))
+    }
+
+    /// Move a port into a VRF (or into quarantine when `vrf` is `None`), verify
+    /// witnesses first, apply the port contract, and report what was enforced.
+    /// The default maps onto `attach_host` / `detach_host` for adapters that
+    /// predate the contract: no witnesses are evaluated and nothing is enforced,
+    /// which is exactly what the returned `Enforcement` says.
+    async fn set_port_membership(&self, m: &PortMembership) -> Result<Enforcement, FabricError> {
+        match (&m.vrf, &m.previous_vrf) {
+            (Some(vrf), _) => {
+                self.attach_host(&HostAttachment {
+                    vpc_name: vrf.clone(),
+                    connection: m.port.clone(),
+                })
+                .await?
+            }
+            (None, Some(prev)) => {
+                self.detach_host(&HostAttachment {
+                    vpc_name: prev.clone(),
+                    connection: m.port.clone(),
+                })
+                .await?
+            }
+            (None, None) => {
+                return Err(FabricError::Invalid(format!(
+                    "port {}: moving to quarantine needs previous_vrf on a legacy adapter",
+                    m.port
+                )));
+            }
+        }
+        Ok(Enforcement::default())
+    }
 }
 
 /// Hedgehog-backed implementation, applying `vpc.githedgehog.com/v1beta1` CRDs via
