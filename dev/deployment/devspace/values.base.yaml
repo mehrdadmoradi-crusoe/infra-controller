@@ -32,17 +32,19 @@ nico-api:
       type = "ipv4"
       ranges = [{ start = "10.180.64.1", end = "10.180.127.254" }]
 
+      # Pools sized for scale runs of the ToR-VRF e2e (deleted segments keep
+      # their VNI/VLAN through the 5 min drain window, so 51 was too few).
       [pools.vlan-id]
       type = "integer"
-      ranges = [{ start = "100", end = "501" }]
+      ranges = [{ start = "100", end = "2000" }]
 
       [pools.vni]
       type = "integer"
-      ranges = [{ start = "1024500", end = "1024550" }]
+      ranges = [{ start = "1024500", end = "1026500" }]
 
       [pools.vpc-vni]
       type = "integer"
-      ranges = [{ start = "2024500", end = "2024550" }]
+      ranges = [{ start = "2024500", end = "2026500" }]
 
       [pools.fnn-asn]
       type = "integer"

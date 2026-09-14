@@ -132,8 +132,17 @@ impl EdaFabric {
             client_secret,
             token: Arc::new(Mutex::new(None)),
         };
-        // Fail fast at startup if EDA is unreachable or the credentials are wrong.
-        me.token(true).await?;
+        // Probe EDA once so a misconfiguration shows up in the startup log, but
+        // never let the fabric controller keep the control plane from starting:
+        // the reconcile is level-triggered and converges once EDA is reachable.
+        // (Verified the hard way: a stale tunnel to EDA crash-looped nico-api.)
+        if let Err(e) = me.token(true).await {
+            tracing::warn!(
+                api_url = %me.cfg.api_url,
+                error = %e,
+                "fabric(eda): EDA API not reachable at startup; continuing, reconcile will retry"
+            );
+        }
         Ok(me)
     }
 
