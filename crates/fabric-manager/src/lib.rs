@@ -12,11 +12,16 @@
 //! Validated end to end against a Hedgehog vlab via the `nico2hedgehog.py` adapter,
 //! which is this reconcile's executable spec.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_fabric::{FabricOperations, HostAttachment, VrfIntent};
+use carbide_fabric::{
+    Capabilities, FabricError, FabricOperations, PortContract, PortMembership, VrfIntent, Witnesses,
+};
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_uuid::machine::MachineId;
+use health_report::{HealthProbeAlert, HealthReport, HealthReportApplyMode};
 use model::network_segment::NetworkSegmentType;
 use model::vpc::Vpc;
 use sqlx::PgPool;
@@ -27,6 +32,12 @@ use tokio_util::sync::CancellationToken;
 /// (leaf port wiring) it is cabled to. NetBox-syncable; NICo reads it, never
 /// invents it. A host without it is simply not attached this pass.
 const CONNECTION_LABEL: &str = "fabric.nico.io/connection";
+
+/// `HealthReport.source` under which the reconcile raises and clears the
+/// witness-mismatch alert on a machine.
+pub const WITNESS_HEALTH_SOURCE: &str = "fabric-witness";
+/// Probe id of that alert.
+pub const WITNESS_ALERT_ID: &str = "FabricWitnessMismatch";
 
 #[cfg(test)]
 mod tests;
@@ -75,6 +86,9 @@ pub struct FabricManager {
     fabric: Arc<dyn FabricOperations>,
     db: PgPool,
     config: FabricManagerConfig,
+    /// Name of the provider-owned VPC whose VRF is the quarantine VRF (see
+    /// `FabricConfig::quarantine_vpc`).
+    quarantine_vpc: Option<String>,
 }
 
 impl std::fmt::Debug for FabricManager {
@@ -87,7 +101,19 @@ impl std::fmt::Debug for FabricManager {
 
 impl FabricManager {
     pub fn new(fabric: Arc<dyn FabricOperations>, db: PgPool, config: FabricManagerConfig) -> Self {
-        Self { fabric, db, config }
+        Self {
+            fabric,
+            db,
+            config,
+            quarantine_vpc: None,
+        }
+    }
+
+    /// Name the quarantine VPC. Unplaced ports are members of its VRF on
+    /// adapters that declare `quarantine_vrf`; without it they are unbound.
+    pub fn with_quarantine_vpc(mut self, name: Option<String>) -> Self {
+        self.quarantine_vpc = name;
+        self
     }
 
     /// Spawn the reconcile loop into `join_set` (mirror of the other periodic
@@ -115,7 +141,8 @@ impl FabricManager {
         }
     }
 
-    /// One reconcile pass: ensure a fabric VRF for every ToR-VRF VPC.
+    /// One reconcile pass: a fabric VRF for every ToR-VRF VPC, then every
+    /// managed port in exactly one VRF (a tenant's or quarantine), then GC.
     pub async fn run_single_iteration(&self) -> eyre::Result<usize> {
         let vpcs = self.list_tor_vrf_vpcs().await?;
         tracing::debug!(
@@ -123,16 +150,297 @@ impl FabricManager {
             "fabric-manager: reconciling ToR-VRF VPCs"
         );
         let mut ok = 0usize;
+        let mut ready: Vec<&Vpc> = Vec::new();
         for vpc in &vpcs {
             match self.reconcile_vpc(vpc).await {
-                Ok(()) => ok += 1,
+                Ok(true) => {
+                    ok += 1;
+                    ready.push(vpc);
+                }
+                Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: VPC reconcile failed")
                 }
             }
         }
+        if let Some(q) = &self.quarantine_vpc
+            && !ready.iter().any(|v| &v.metadata.name == q)
+        {
+            tracing::warn!(quarantine_vpc = %q,
+                "fabric-manager: quarantine VPC is not a ready ToR-VRF VPC; unplaced ports stay where they are");
+        }
+        // Ports after VRFs, GC after both; a port-side failure is reported after
+        // GC has run so one bad read never leaves orphans behind.
+        let ports = self.reconcile_ports(&ready).await;
         self.gc_orphaned_vrfs(&vpcs).await;
+        ports.map_err(|e| eyre::eyre!("fabric-manager: port reconcile failed: {e}"))?;
         Ok(ok)
+    }
+
+    /// Ports NICo wants bound somewhere, keyed by the fabric port name from the
+    /// cabling record. Placed hosts (a live instance in a ready ToR-VRF VPC) go
+    /// to that VPC's VRF with their NIC MACs as witnesses; every other host that
+    /// has a cabling record, discovered or only expected, goes to quarantine.
+    async fn desired_ports(&self, ready: &[&Vpc]) -> eyre::Result<BTreeMap<String, DesiredPort>> {
+        let mut desired: BTreeMap<String, DesiredPort> = BTreeMap::new();
+        for vpc in ready {
+            if Some(&vpc.metadata.name) == self.quarantine_vpc.as_ref() {
+                continue;
+            }
+            let instance_ids: Vec<carbide_uuid::instance::InstanceId> = sqlx::query_scalar(
+                "SELECT DISTINCT i.id FROM instances i \
+                 JOIN instance_addresses a ON a.instance_id = i.id \
+                 WHERE a.vpc_id = $1 AND i.deleted IS NULL",
+            )
+            .bind(vpc.id)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| {
+                eyre::eyre!(
+                    "fabric-manager: list live instances for vpc {}: {e}",
+                    vpc.id
+                )
+            })?;
+            for id in instance_ids {
+                let Some(inst) = db::instance::find_by_id(&self.db, id).await? else {
+                    continue;
+                };
+                let Some(machine) = db::machine::find_one(
+                    &self.db,
+                    &inst.machine_id,
+                    model::machine::machine_search_config::MachineSearchConfig::default(),
+                )
+                .await?
+                else {
+                    continue;
+                };
+                let Some(port) = machine.metadata.labels.get(CONNECTION_LABEL) else {
+                    tracing::debug!(vpc = %vpc.id, machine = %inst.machine_id,
+                        "fabric-manager: host has no {CONNECTION_LABEL} label; not attaching");
+                    continue;
+                };
+                let macs: Vec<String> = machine
+                    .hardware_info
+                    .as_ref()
+                    .map(|h| {
+                        h.network_interfaces
+                            .iter()
+                            .map(|n| n.mac_address.to_string().to_ascii_lowercase())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                desired.insert(
+                    port.clone(),
+                    DesiredPort {
+                        vrf: Some(vpc.metadata.name.clone()),
+                        machine_id: Some(inst.machine_id),
+                        witnesses: Witnesses {
+                            expected_macs: macs.clone(),
+                            // Zero-DPU hosts report no LLDP today (scout gap);
+                            // the adapter skips the check when this is None.
+                            expected_lldp: None,
+                        },
+                        contract: PortContract {
+                            allowed_macs: macs,
+                            allowed_ips: Vec::new(),
+                            dhcp_snooping: true,
+                            storm_control: true,
+                            isolated_port: false,
+                        },
+                    },
+                );
+            }
+        }
+        // Discovered hosts with a cabling record that are not placed.
+        let labelled: Vec<(MachineId, String)> =
+            sqlx::query_as("SELECT id, labels->>$1 FROM machines WHERE labels ? $1")
+                .bind(CONNECTION_LABEL)
+                .fetch_all(&self.db)
+                .await
+                .map_err(|e| eyre::eyre!("fabric-manager: list labelled machines: {e}"))?;
+        for (machine_id, port) in labelled {
+            desired.entry(port).or_insert(DesiredPort {
+                vrf: None,
+                machine_id: Some(machine_id),
+                witnesses: Witnesses::default(),
+                contract: PortContract::default(),
+            });
+        }
+        // Expected (not yet discovered) hosts: their port must be in quarantine
+        // before the first DHCP, or discovery never starts.
+        let expected: Vec<(String,)> = sqlx::query_as(
+            "SELECT metadata_labels->>$1 FROM expected_machines WHERE metadata_labels ? $1",
+        )
+        .bind(CONNECTION_LABEL)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| eyre::eyre!("fabric-manager: list labelled expected machines: {e}"))?;
+        for (port,) in expected {
+            desired.entry(port).or_insert(DesiredPort {
+                vrf: None,
+                machine_id: None,
+                witnesses: Witnesses::default(),
+                contract: PortContract::default(),
+            });
+        }
+        Ok(desired)
+    }
+
+    /// Bring every managed port to its desired VRF. Diffs against the fabric's
+    /// own listing so a converged pass makes no writes; refusals (witnesses)
+    /// become a health alert on the machine and are retried next pass.
+    async fn reconcile_ports(&self, ready: &[&Vpc]) -> eyre::Result<()> {
+        let caps: Capabilities = self.fabric.capabilities().await?;
+        let desired = self.desired_ports(ready).await?;
+        let current: BTreeMap<String, Option<String>> = self
+            .fabric
+            .list_port_memberships()
+            .await?
+            .into_iter()
+            .map(|m| (m.port, m.vrf))
+            .collect();
+        let quarantine = self.quarantine_vpc.as_deref();
+        let is_quarantine = |v: Option<&str>| v.is_none() || v == quarantine;
+        let ready_names: BTreeSet<&str> = ready.iter().map(|v| v.metadata.name.as_str()).collect();
+
+        // 1. Ports bound to a tenant VRF that NICo no longer places there.
+        for (port, cur) in &current {
+            let cur = cur.as_deref();
+            if is_quarantine(cur) {
+                continue;
+            }
+            let want = desired.get(port).and_then(|d| d.vrf.as_deref());
+            if want == cur || (want.is_some() && !is_quarantine(want)) {
+                // Same VRF, or a move between tenant VRFs (done in step 2).
+                continue;
+            }
+            tracing::info!(%port, from = ?cur, "fabric-manager: port leaves tenant VRF");
+            let m = PortMembership {
+                port: port.clone(),
+                vrf: None,
+                previous_vrf: cur.map(str::to_string),
+                ..PortMembership::default()
+            };
+            if let Err(e) = self.fabric.set_port_membership(&m).await {
+                tracing::warn!(%port, error = %e, "fabric-manager: quarantine failed");
+            }
+        }
+
+        // 2. Placed hosts whose port is not yet in their tenant VRF.
+        for (port, d) in &desired {
+            let Some(vrf) = d.vrf.as_deref() else {
+                continue;
+            };
+            if !ready_names.contains(vrf) {
+                continue;
+            }
+            let cur = current.get(port).cloned().flatten();
+            if cur.as_deref() == Some(vrf) {
+                continue;
+            }
+            let m = PortMembership {
+                port: port.clone(),
+                vrf: Some(vrf.to_string()),
+                previous_vrf: cur.filter(|c| Some(c.as_str()) != quarantine),
+                witnesses: d.witnesses.clone(),
+                contract: d.contract.clone(),
+            };
+            match self.fabric.set_port_membership(&m).await {
+                Ok(enforced) => {
+                    tracing::info!(%port, %vrf, ?enforced, "fabric-manager: port bound to tenant VRF");
+                    if let Some(id) = &d.machine_id {
+                        self.clear_witness_alert(id).await;
+                    }
+                }
+                Err(FabricError::WitnessMismatch { detail, .. }) => {
+                    tracing::warn!(%port, %vrf, %detail, "fabric-manager: attach refused by witnesses");
+                    if let Some(id) = &d.machine_id {
+                        self.raise_witness_alert(id, port, &detail).await;
+                    }
+                }
+                Err(e) => tracing::warn!(%port, %vrf, error = %e, "fabric-manager: attach failed"),
+            }
+        }
+
+        // 3. Unplaced hosts whose port the fabric does not list yet: into
+        // quarantine, where the adapter has one to offer.
+        if caps.quarantine_vrf {
+            for (port, d) in &desired {
+                if d.vrf.is_some() || current.contains_key(port) {
+                    continue;
+                }
+                let m = PortMembership {
+                    port: port.clone(),
+                    ..PortMembership::default()
+                };
+                match self.fabric.set_port_membership(&m).await {
+                    Ok(_) => tracing::info!(%port, "fabric-manager: port placed in quarantine"),
+                    Err(e) => {
+                        tracing::warn!(%port, error = %e, "fabric-manager: quarantine failed")
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn raise_witness_alert(&self, machine_id: &MachineId, port: &str, detail: &str) {
+        let now = chrono::Utc::now();
+        let Ok(id) = WITNESS_ALERT_ID.parse() else {
+            return;
+        };
+        let report = HealthReport {
+            source: WITNESS_HEALTH_SOURCE.to_string(),
+            triggered_by: None,
+            observed_at: Some(now),
+            successes: vec![],
+            alerts: vec![HealthProbeAlert {
+                id,
+                target: Some(port.to_string()),
+                in_alert_since: Some(now),
+                message: format!("fabric refused to attach port {port}: {detail}"),
+                tenant_message: None,
+                classifications: vec![],
+            }],
+        };
+        if let Err(e) = self.write_health_report(machine_id, &report).await {
+            tracing::warn!(machine = %machine_id, error = %e, "fabric-manager: raising witness alert failed");
+        }
+    }
+
+    async fn clear_witness_alert(&self, machine_id: &MachineId) {
+        if let Err(e) = self.remove_health_report(machine_id).await {
+            tracing::debug!(machine = %machine_id, error = %e, "fabric-manager: clearing witness alert");
+        }
+    }
+
+    async fn write_health_report(
+        &self,
+        machine_id: &MachineId,
+        report: &HealthReport,
+    ) -> eyre::Result<()> {
+        let mut conn = self.db.acquire().await?;
+        db::machine::insert_health_report(
+            &mut conn,
+            machine_id,
+            HealthReportApplyMode::Merge,
+            report,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_health_report(&self, machine_id: &MachineId) -> eyre::Result<()> {
+        let mut conn = self.db.acquire().await?;
+        db::machine::remove_health_report(
+            &mut conn,
+            machine_id,
+            HealthReportApplyMode::Merge,
+            WITNESS_HEALTH_SOURCE,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Tear down fabric VRFs whose NICo VPC no longer exists (or is no longer
@@ -190,7 +498,9 @@ impl FabricManager {
         Ok(())
     }
 
-    async fn reconcile_vpc(&self, vpc: &Vpc) -> eyre::Result<()> {
+    /// Returns `Ok(true)` when the VRF was ensured (segment ready), `Ok(false)`
+    /// when the VPC is not provisioned far enough yet.
+    async fn reconcile_vpc(&self, vpc: &Vpc) -> eyre::Result<bool> {
         debug_assert_eq!(
             vpc.config.network_virtualization_type,
             VpcVirtualizationType::TorVrf
@@ -203,17 +513,17 @@ impl FabricManager {
             .find(|s| s.config.segment_type == NetworkSegmentType::HostInband)
         else {
             tracing::info!(vpc = %vpc.id, "fabric-manager: no HostInband segment yet; skipping");
-            return Ok(());
+            return Ok(false);
         };
         let Some(vlan_id) = seg.status.vlan_id else {
             tracing::info!(vpc = %vpc.id, "fabric-manager: segment VLAN not allocated yet; skipping");
-            return Ok(());
+            return Ok(false);
         };
         // A HostInband segment normally has one prefix; take the first that carries
         // a gateway (subnet + gateway must go to the fabric together).
         let Some(prefix) = seg.prefixes.iter().find(|p| p.gateway.is_some()) else {
             tracing::info!(vpc = %vpc.id, "fabric-manager: segment prefix/gateway not ready; skipping");
-            return Ok(());
+            return Ok(false);
         };
         let intent = VrfIntent {
             nico_vpc_id: vpc.id.to_string(),
@@ -252,77 +562,7 @@ impl FabricManager {
             }
         }
 
-        // (b) Attach every placed host whose operator-declared Connection label is
-        // set. NICo references the fabric-owned wiring by name; it never invents it.
-        // Placed hosts are the *live* instances addressed in this VPC. A released
-        // instance stays as a soft-deleted row while the host is cleaned up, but
-        // the tenant no longer owns the host, so its port must leave the tenant
-        // VRF on this pass (and, once the quarantine VRF exists, land there).
-        let instance_ids: Vec<carbide_uuid::instance::InstanceId> = sqlx::query_scalar(
-            "SELECT DISTINCT i.id FROM instances i \
-             JOIN instance_addresses a ON a.instance_id = i.id \
-             WHERE a.vpc_id = $1 AND i.deleted IS NULL",
-        )
-        .bind(vpc.id)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| {
-            eyre::eyre!(
-                "fabric-manager: list live instances for vpc {}: {e}",
-                vpc.id
-            )
-        })?;
-        let mut desired_connections: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for id in instance_ids {
-            let Some(inst) = db::instance::find_by_id(&self.db, id).await? else {
-                continue;
-            };
-            let Some(machine) = db::machine::find_one(
-                &self.db,
-                &inst.machine_id,
-                model::machine::machine_search_config::MachineSearchConfig::default(),
-            )
-            .await?
-            else {
-                continue;
-            };
-            let Some(connection) = machine.metadata.labels.get(CONNECTION_LABEL) else {
-                tracing::debug!(vpc = %vpc.id, machine = %inst.machine_id,
-                    "fabric-manager: host has no {CONNECTION_LABEL} label; not attaching");
-                continue;
-            };
-            self.fabric
-                .attach_host(&HostAttachment {
-                    vpc_name: vpc.metadata.name.clone(),
-                    connection: connection.clone(),
-                })
-                .await?;
-            desired_connections.insert(connection.clone());
-        }
-        // (b') Detach ports whose instance is gone. Same level-triggered shape as
-        // GC: whatever the fabric has bound to this VRF that NICo no longer places
-        // is removed on the next pass. A listing failure only skips the detach.
-        match self.fabric.list_attachments(&vpc.metadata.name).await {
-            Ok(bound) => {
-                for connection in bound
-                    .into_iter()
-                    .filter(|c| !desired_connections.contains(c))
-                {
-                    tracing::info!(vpc = %vpc.id, %connection,
-                        "fabric-manager: detaching port with no placed instance");
-                    self.fabric
-                        .detach_host(&HostAttachment {
-                            vpc_name: vpc.metadata.name.clone(),
-                            connection,
-                        })
-                        .await?;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: list_attachments failed; skipping detach")
-            }
-        }
+        // (b) Port memberships are reconciled across all VPCs in `reconcile_ports`.
 
         // (c) Peer with other fabric-managed (TorVrf) VPCs. NICo programs peering
         // only within the fabric-managed set; a Flat peer's side is the operator's.
@@ -348,6 +588,17 @@ impl FabricManager {
                     .await?;
             }
         }
-        Ok(())
+        Ok(true)
     }
+}
+
+/// Where NICo wants one port and what the fabric may check and enforce there.
+#[derive(Debug, Clone)]
+struct DesiredPort {
+    /// Tenant VPC name, or `None` for quarantine.
+    vrf: Option<String>,
+    /// The machine on the port, when NICo knows it (alerts land here).
+    machine_id: Option<MachineId>,
+    witnesses: Witnesses,
+    contract: PortContract,
 }

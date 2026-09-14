@@ -77,7 +77,7 @@ pub struct Outcome {
 
 /// Number of outcomes a full run records. Skipped witness checks still record
 /// an outcome, so this is constant across adapters.
-pub const CHECK_COUNT: usize = 13;
+pub const CHECK_COUNT: usize = 14;
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -296,6 +296,24 @@ pub async fn run(fabric: Arc<dyn FabricOperations>, fx: &Fixture) -> Report {
         {
             Ok(_) => Ok("second detach ok".to_string()),
             Err(e) => Err(e.to_string()),
+        },
+    );
+
+    // 8b. quarantine is visible: an adapter with a quarantine VRF lists the
+    // port with no VRF, so a reconcile can tell "quarantined" from "unknown".
+    rep.record(
+        "quarantine_listed",
+        if caps.quarantine_vrf {
+            match f.list_port_memberships().await {
+                Ok(ms) => match ms.iter().find(|m| m.port == fx.port_a) {
+                    Some(m) if m.vrf.is_none() => Ok("port listed in quarantine".to_string()),
+                    Some(m) => Err(format!("port listed in {:?} after detach", m.vrf)),
+                    None => Err("quarantined port is not listed".to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            }
+        } else {
+            Ok("skipped: adapter declares no quarantine_vrf".to_string())
         },
     );
 

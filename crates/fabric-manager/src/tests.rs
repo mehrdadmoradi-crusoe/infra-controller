@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use carbide_fabric::{FabricError, HostAttachment, MockFabricOperations, VrfIntent};
+use carbide_fabric::{
+    Capabilities, Enforcement, FabricError, MockFabricOperations, PortMembership, VrfIntent,
+};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
@@ -20,7 +22,50 @@ use model::machine::ManagedHostState;
 use model::metadata::Metadata;
 use model::network_segment::NetworkSegment;
 
-use super::{CONNECTION_LABEL, FabricManager, FabricManagerConfig};
+use super::{CONNECTION_LABEL, FabricManager, FabricManagerConfig, WITNESS_HEALTH_SOURCE};
+
+/// A mock that answers the port-reconcile's read side like an adapter written
+/// before the contract: legacy capabilities, nothing bound anywhere.
+fn legacy_mock() -> MockFabricOperations {
+    let mut fabric = MockFabricOperations::new();
+    fabric
+        .expect_capabilities()
+        .returning(|| Ok(Capabilities::legacy("mock", true)));
+    fabric.expect_list_port_memberships().returning(|| Ok(vec![]));
+    fabric
+}
+
+/// Seed a host with a cabling label and the NIC MACs discovery would report.
+async fn seed_host_with_nics(
+    conn: &mut sqlx::PgConnection,
+    connection: &str,
+    macs: &[&str],
+) -> eyre::Result<MachineId> {
+    let machine_id = seed_host_with_connection(conn, connection).await?;
+    let hw = model::hardware_info::HardwareInfo {
+        network_interfaces: macs
+            .iter()
+            .map(|m| model::hardware_info::NetworkInterface {
+                mac_address: m.parse().expect("mac"),
+                pci_properties: None,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    db::machine_topology::create_or_update(conn, &machine_id, &hw).await?;
+    Ok(machine_id)
+}
+
+async fn witness_alert_present(pool: &sqlx::PgPool, machine_id: &MachineId) -> eyre::Result<bool> {
+    let (present,): (bool,) = sqlx::query_as(
+        "SELECT coalesce(health_reports->'merges' ? $2, false) FROM machines WHERE id = $1",
+    )
+    .bind(machine_id)
+    .bind(WITNESS_HEALTH_SOURCE)
+    .fetch_one(pool)
+    .await?;
+    Ok(present)
+}
 
 /// Seed a ToR-VRF VPC and return its id.
 async fn seed_tor_vpc(
@@ -143,11 +188,6 @@ async fn reconciles_vrf_and_peering(pool: sqlx::PgPool) -> eyre::Result<()> {
         .withf(|a: &str, b: &str| (a == "tor-a" && b == "tor-b") || (a == "tor-b" && b == "tor-a"))
         .times(1)
         .returning(|_, _| Ok(()));
-    // no instances placed -> no host attachment.
-    fabric.expect_attach_host().times(0).returning(|_| Ok(()));
-    // nothing bound on the fabric either -> nothing to detach.
-    fabric.expect_list_attachments().returning(|_| Ok(vec![]));
-    fabric.expect_detach_host().times(0).returning(|_| Ok(()));
     // The fabric reports a status object -> the reconcile must persist it on the
     // VPC as `programmed` (asserted below).
     fabric
@@ -252,28 +292,25 @@ async fn attaches_host_from_connection_label(pool: sqlx::PgPool) -> eyre::Result
     .await?;
     txn.commit().await?;
 
-    let mut fabric = MockFabricOperations::new();
+    let mut fabric = legacy_mock();
     fabric.expect_ensure_vrf().returning(|_| Ok(()));
     fabric.expect_get_vrf_status().returning(|_| Ok(None));
-    // The host is attached to the fabric Connection named by its label.
+    fabric.expect_list_vrfs().returning(|| Ok(vec![]));
+    // The host's port is bound into the tenant VRF named by its label, once,
+    // with no previous VRF (the fabric listed nothing for it).
     fabric
-        .expect_attach_host()
-        .withf(|a: &HostAttachment| a.vpc_name == "tor-a" && a.connection == "leaf01/Ethernet1")
+        .expect_set_port_membership()
+        .withf(|m: &PortMembership| {
+            m.port == "leaf01/Ethernet1"
+                && m.vrf.as_deref() == Some("tor-a")
+                && m.previous_vrf.is_none()
+                && m.contract.storm_control
+        })
         .times(1)
-        .returning(|_| Ok(()));
-    // The fabric already binds exactly that port -> nothing to detach.
-    fabric
-        .expect_list_attachments()
-        .returning(|_| Ok(vec!["leaf01/Ethernet1".to_string()]));
-    fabric.expect_detach_host().times(0).returning(|_| Ok(()));
+        .returning(|_| Ok(Enforcement::default()));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
-    let vpcs = mgr.list_tor_vrf_vpcs().await?;
-    for v in &vpcs {
-        mgr.reconcile_vpc(v)
-            .await
-            .map_err(|e| eyre::eyre!("reconcile {} failed: {e}", v.metadata.name))?;
-    }
+    assert_eq!(mgr.run_single_iteration().await?, 1);
     Ok(())
 }
 
@@ -284,15 +321,15 @@ async fn skips_vpc_without_ready_segment(pool: sqlx::PgPool) -> eyre::Result<()>
     seed_tor_vpc(&mut txn, "tor-c", Some(1)).await?;
     txn.commit().await?;
 
-    let mut fabric = MockFabricOperations::new();
+    let mut fabric = legacy_mock();
     // Must not push an incomplete VRF.
     fabric.expect_ensure_vrf().times(0).returning(|_| Ok(()));
     // run_single_iteration also runs GC; nothing on the fabric to collect.
     fabric.expect_list_vrfs().returning(|| Ok(vec![]));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
-    // The VPC is still counted as reconciled (skipped cleanly).
-    assert_eq!(mgr.run_single_iteration().await?, 1);
+    // A VPC that is not provisioned far enough is skipped, not counted.
+    assert_eq!(mgr.run_single_iteration().await?, 0);
     Ok(())
 }
 
@@ -304,7 +341,7 @@ async fn gc_tears_down_orphaned_vrf(pool: sqlx::PgPool) -> eyre::Result<()> {
     txn.commit().await?;
     let live_id = live.to_string();
 
-    let mut fabric = MockFabricOperations::new();
+    let mut fabric = legacy_mock();
     fabric.expect_ensure_vrf().times(0).returning(|_| Ok(()));
     // The fabric reports two VRFs: one still backed by NICo intent, one whose
     // NICo VPC is gone. Only the orphan must be torn down.
@@ -321,7 +358,7 @@ async fn gc_tears_down_orphaned_vrf(pool: sqlx::PgPool) -> eyre::Result<()> {
         .returning(|_| Ok(()));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
-    assert_eq!(mgr.run_single_iteration().await?, 1);
+    assert_eq!(mgr.run_single_iteration().await?, 0);
     Ok(())
 }
 
@@ -336,7 +373,7 @@ async fn fabric_errors_are_isolated_and_not_fatal(pool: sqlx::PgPool) -> eyre::R
     txn.commit().await?;
 
     let unreachable = || FabricError::Invalid("fabric unreachable".to_string());
-    let mut fabric = MockFabricOperations::new();
+    let mut fabric = legacy_mock();
     // The fabric fails for one tenant only; the other must still converge.
     fabric
         .expect_ensure_vrf()
@@ -351,10 +388,7 @@ async fn fabric_errors_are_isolated_and_not_fatal(pool: sqlx::PgPool) -> eyre::R
     fabric
         .expect_list_vrfs()
         .returning(move || Err(unreachable()));
-    fabric.expect_attach_host().times(0).returning(|_| Ok(()));
-    // nothing bound on the fabric either -> nothing to detach.
-    fabric.expect_list_attachments().returning(|_| Ok(vec![]));
-    fabric.expect_detach_host().times(0).returning(|_| Ok(()));
+    fabric.expect_set_port_membership().times(0).returning(|_| Ok(Enforcement::default()));
     fabric.expect_delete_vrf().times(0).returning(|_| Ok(()));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
@@ -447,21 +481,21 @@ async fn lifecycle_converges_against_the_fake(pool: sqlx::PgPool) -> eyre::Resul
         FabricManagerConfig::default(),
     );
     async fn pass(mgr: &FabricManager) -> eyre::Result<()> {
-        for v in &mgr.list_tor_vrf_vpcs().await? {
-            mgr.reconcile_vpc(v)
-                .await
-                .map_err(|e| eyre::eyre!("reconcile {}: {e}", v.metadata.name))?;
-        }
+        mgr.run_single_iteration().await?;
         Ok(())
     }
 
-    // Pass 1: VRF exists, nothing attached (no instance).
+    // Pass 1: VRF exists; the cabled but unplaced host is in quarantine.
     pass(&mgr).await?;
     let vrfs = fake.vrfs();
     assert_eq!(vrfs.len(), 1);
     assert_eq!(vrfs["life"].intent.vni, Some(10042));
     assert_eq!(vrfs["life"].intent.vlan, 142);
     assert!(fake.memberships().is_empty());
+    assert!(
+        fake.quarantined().contains("leaf1-ethernet-1-3"),
+        "an unplaced host with a cabling record is quarantined before anything else"
+    );
 
     // Pass 2: an instance is placed -> port attached.
     let mut txn = pool.begin().await?;
@@ -482,9 +516,10 @@ async fn lifecycle_converges_against_the_fake(pool: sqlx::PgPool) -> eyre::Resul
     assert!(
         !fake.calls().iter().any(|c| matches!(
             c,
-            carbide_fabric::fake::Call::SetPortMembership { vrf: None, .. }
+            carbide_fabric::fake::Call::SetPortMembership { .. }
         )),
-        "nothing detached in steady state"
+        "no port writes in steady state: {:?}",
+        fake.calls()
     );
 
     // Pass 4: instance released (soft-deleted) -> port leaves the tenant VRF.
@@ -496,6 +531,10 @@ async fn lifecycle_converges_against_the_fake(pool: sqlx::PgPool) -> eyre::Resul
     assert!(
         !fake.memberships().contains_key("leaf1-ethernet-1-3"),
         "released host is unplaced"
+    );
+    assert!(
+        fake.quarantined().contains("leaf1-ethernet-1-3"),
+        "released host's port went to quarantine, not nowhere"
     );
     assert_eq!(
         fake.vrfs().len(),
@@ -587,24 +626,33 @@ async fn detaches_port_of_a_released_instance(pool: sqlx::PgPool) -> eyre::Resul
     txn.commit().await?;
 
     let mut fabric = MockFabricOperations::new();
+    fabric
+        .expect_capabilities()
+        .returning(|| Ok(Capabilities::legacy("mock", true)));
     fabric.expect_ensure_vrf().returning(|_| Ok(()));
     fabric.expect_get_vrf_status().returning(|_| Ok(None));
-    fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    fabric.expect_list_vrfs().returning(|| Ok(vec![]));
+    // The fabric still binds the port into tor-a.
+    fabric.expect_list_port_memberships().returning(|| {
+        Ok(vec![PortMembership {
+            port: "leaf01/Ethernet1".into(),
+            vrf: Some("tor-a".into()),
+            ..PortMembership::default()
+        }])
+    });
+    // Exactly one move out of tor-a to quarantine, carrying previous_vrf.
     fabric
-        .expect_list_attachments()
-        .returning(|_| Ok(vec!["leaf01/Ethernet1".to_string()]));
-    fabric
-        .expect_detach_host()
-        .withf(|a: &HostAttachment| a.vpc_name == "tor-a" && a.connection == "leaf01/Ethernet1")
+        .expect_set_port_membership()
+        .withf(|m: &PortMembership| {
+            m.port == "leaf01/Ethernet1"
+                && m.vrf.is_none()
+                && m.previous_vrf.as_deref() == Some("tor-a")
+        })
         .times(1)
-        .returning(|_| Ok(()));
+        .returning(|_| Ok(Enforcement::default()));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
-    for v in &mgr.list_tor_vrf_vpcs().await? {
-        mgr.reconcile_vpc(v)
-            .await
-            .map_err(|e| eyre::eyre!("reconcile {} failed: {e}", v.metadata.name))?;
-    }
+    assert_eq!(mgr.run_single_iteration().await?, 1);
     Ok(())
 }
 
@@ -619,24 +667,123 @@ async fn detaches_port_whose_instance_is_gone(pool: sqlx::PgPool) -> eyre::Resul
     txn.commit().await?;
 
     let mut fabric = MockFabricOperations::new();
+    fabric
+        .expect_capabilities()
+        .returning(|| Ok(Capabilities::legacy("mock", true)));
     fabric.expect_ensure_vrf().returning(|_| Ok(()));
     fabric.expect_get_vrf_status().returning(|_| Ok(None));
-    fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    fabric.expect_list_vrfs().returning(|| Ok(vec![]));
+    fabric.expect_list_port_memberships().returning(|| {
+        Ok(vec![PortMembership {
+            port: "leaf01/Ethernet1".into(),
+            vrf: Some("tor-a".into()),
+            ..PortMembership::default()
+        }])
+    });
     fabric
-        .expect_list_attachments()
-        .withf(|v: &str| v == "tor-a")
-        .returning(|_| Ok(vec!["leaf01/Ethernet1".to_string()]));
-    fabric
-        .expect_detach_host()
-        .withf(|a: &HostAttachment| a.vpc_name == "tor-a" && a.connection == "leaf01/Ethernet1")
+        .expect_set_port_membership()
+        .withf(|m: &PortMembership| {
+            m.port == "leaf01/Ethernet1"
+                && m.vrf.is_none()
+                && m.previous_vrf.as_deref() == Some("tor-a")
+        })
         .times(1)
-        .returning(|_| Ok(()));
+        .returning(|_| Ok(Enforcement::default()));
 
     let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
-    for v in &mgr.list_tor_vrf_vpcs().await? {
-        mgr.reconcile_vpc(v)
-            .await
-            .map_err(|e| eyre::eyre!("reconcile {} failed: {e}", v.metadata.name))?;
-    }
+    assert_eq!(mgr.run_single_iteration().await?, 1);
+    Ok(())
+}
+
+/// A wrong cabling record must not put a tenant's VLAN on someone else's host:
+/// the fabric refuses on the MAC witness, the machine gets a health alert, and
+/// the pass converges once the switch sees the expected host.
+#[carbide_macros::sqlx_test]
+async fn witness_mismatch_raises_an_alert_and_clears_on_match(pool: sqlx::PgPool) -> eyre::Result<()> {
+    let mut txn = pool.begin().await?;
+    let vpc = seed_tor_vpc(&mut txn, "wit", Some(10043)).await?;
+    let seg = seed_hostinband_segment(&mut txn, vpc, 143, "10.43.0.0/24", "10.43.0.1").await?;
+    let machine_id = seed_host_with_nics(&mut txn, "leaf1-ethernet-1-3", &["06:00:00:00:05:01"]).await?;
+    seed_instance(&mut txn, machine_id, vpc, &seg, "10.43.0.10").await?;
+    txn.commit().await?;
+
+    let fake = carbide_fabric::FakeFabric::new();
+    // The leaf sees a different host on that port.
+    fake.observe("leaf1-ethernet-1-3", &["aa:bb:cc:dd:ee:ff"], None);
+    let mgr = FabricManager::new(
+        Arc::new(fake.clone()),
+        pool.clone(),
+        FabricManagerConfig::default(),
+    );
+
+    mgr.run_single_iteration().await?;
+    assert!(
+        !fake.memberships().contains_key("leaf1-ethernet-1-3"),
+        "refused attach leaves the port out of the tenant VRF"
+    );
+    assert!(
+        witness_alert_present(&pool, &machine_id).await?,
+        "a witness mismatch raises a health alert on the machine"
+    );
+
+    // The right host shows up on the port: attach goes through, alert clears.
+    fake.observe("leaf1-ethernet-1-3", &["06:00:00:00:05:01"], None);
+    mgr.run_single_iteration().await?;
+    assert_eq!(
+        fake.memberships()
+            .get("leaf1-ethernet-1-3")
+            .map(String::as_str),
+        Some("wit")
+    );
+    assert!(
+        !witness_alert_present(&pool, &machine_id).await?,
+        "alert is cleared once the witnesses match"
+    );
+    Ok(())
+}
+
+/// A host that only exists as an ExpectedMachine (not yet discovered) already
+/// has a cabling record; its port must be in quarantine before its first DHCP.
+#[carbide_macros::sqlx_test]
+async fn expected_host_port_is_quarantined_before_discovery(pool: sqlx::PgPool) -> eyre::Result<()> {
+    let mut txn = pool.begin().await?;
+    db::expected_machine::create(
+        &mut txn,
+        model::expected_machine::ExpectedMachine {
+            id: None,
+            bmc_mac_address: "02:00:00:00:00:aa".parse().expect("mac"),
+            data: model::expected_machine::ExpectedMachineData {
+                bmc_username: "root".into(),
+                bmc_password: "calvin".into(),
+                serial_number: "SN-EXPECTED-1".into(),
+                metadata: Metadata {
+                    labels: HashMap::from([(CONNECTION_LABEL.to_string(), "leaf2-ethernet-1-7".to_string())]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    let fake = carbide_fabric::FakeFabric::new();
+    let mgr = FabricManager::new(
+        Arc::new(fake.clone()),
+        pool.clone(),
+        FabricManagerConfig::default(),
+    );
+    mgr.run_single_iteration().await?;
+    assert!(
+        fake.quarantined().contains("leaf2-ethernet-1-7"),
+        "expected host's port is quarantined: {:?}",
+        fake.quarantined()
+    );
+    fake.clear_calls();
+    mgr.run_single_iteration().await?;
+    assert!(
+        !fake.calls().iter().any(|c| matches!(c, carbide_fabric::fake::Call::SetPortMembership { .. })),
+        "already quarantined: no write on the next pass"
+    );
     Ok(())
 }

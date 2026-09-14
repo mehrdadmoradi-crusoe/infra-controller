@@ -77,6 +77,14 @@ pub struct FabricConfig {
     /// Fabric agent connection details; required when `backend = "agent"`.
     #[serde(default)]
     pub agent: Option<AgentConfig>,
+    /// Name of the provider-owned ToR-VRF VPC whose VRF is the quarantine VRF.
+    /// Every managed port that is not placed in a tenant VPC is a member of it,
+    /// so a newly cabled or released host can DHCP and PXE against NICo. The VPC
+    /// is an ordinary NICo VPC with a HostInband segment; the reconcile creates
+    /// its VRF like any other and adapters bind unplaced ports to it. When unset,
+    /// "quarantine" means "no VRF" and adapters only ever unbind.
+    #[serde(default)]
+    pub quarantine_vpc: Option<String>,
 }
 
 fn default_namespace() -> String {
@@ -91,6 +99,7 @@ impl Default for FabricConfig {
             backend: FabricBackend::default(),
             eda: None,
             agent: None,
+            quarantine_vpc: None,
         }
     }
 }
@@ -307,6 +316,25 @@ pub trait FabricOperations: Send + Sync + std::fmt::Debug {
             }
         }
         Ok(Enforcement::default())
+    }
+
+    /// Every port the backend manages with the VRF it is in (`None` for
+    /// quarantine). The reconcile diffs this against desired state so a
+    /// converged pass makes no writes. The default walks the VRFs and their
+    /// attachments and therefore cannot list quarantined ports; adapters that
+    /// declare `quarantine_vrf` override it.
+    async fn list_port_memberships(&self) -> Result<Vec<PortMembership>, FabricError> {
+        let mut out = Vec::new();
+        for (vrf, _) in self.list_vrfs().await? {
+            for port in self.list_attachments(&vrf).await? {
+                out.push(PortMembership {
+                    port,
+                    vrf: Some(vrf.clone()),
+                    ..PortMembership::default()
+                });
+            }
+        }
+        Ok(out)
     }
 }
 

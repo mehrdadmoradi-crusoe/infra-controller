@@ -226,3 +226,25 @@ async fn agent_down_is_a_per_call_error_not_a_construction_failure() {
     let err = client.list_vrfs().await.expect_err("call must fail");
     assert!(matches!(err, FabricError::Agent(_)), "got {err}");
 }
+
+#[tokio::test]
+async fn quarantined_ports_are_listed_over_the_wire() {
+    let fake = FakeFabric::new();
+    let (client, handle) = start(fake.clone()).await;
+    client
+        .set_port_membership(&PortMembership {
+            port: "leaf2-ethernet-1-3".into(),
+            ..PortMembership::default()
+        })
+        .await
+        .expect("quarantine");
+    let listed = client.list_port_memberships().await.expect("list");
+    handle.abort();
+    assert!(
+        listed
+            .iter()
+            .any(|m| m.port == "leaf2-ethernet-1-3" && m.vrf.is_none()),
+        "quarantined port crosses the wire with an empty vrf: {listed:?}"
+    );
+    assert!(fake.quarantined().contains("leaf2-ethernet-1-3"));
+}

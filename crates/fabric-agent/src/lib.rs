@@ -209,24 +209,21 @@ impl FabricAgent for Service {
     ) -> Result<Response<pb::ListPortMembershipsResponse>, Status> {
         let r = r.into_inner();
         if r.vrf.is_empty() {
-            let vrfs = self.inner.list_vrfs().await.map_err(status_from)?;
-            let mut out = Vec::new();
-            for (name, _) in vrfs {
-                for port in self
-                    .inner
-                    .list_attachments(&name)
-                    .await
-                    .map_err(status_from)?
-                {
-                    out.push(pb::PortMembership {
-                        port,
-                        vrf: name.clone(),
-                        enforced: None,
-                    });
-                }
-            }
+            // Every managed port, quarantined ones included (empty vrf).
+            let all = self
+                .inner
+                .list_port_memberships()
+                .await
+                .map_err(status_from)?;
             return Ok(Response::new(pb::ListPortMembershipsResponse {
-                memberships: out,
+                memberships: all
+                    .into_iter()
+                    .map(|m| pb::PortMembership {
+                        port: m.port,
+                        vrf: m.vrf.unwrap_or_default(),
+                        enforced: None,
+                    })
+                    .collect(),
             }));
         }
         let ports = self

@@ -313,4 +313,25 @@ impl FabricOperations for GrpcFabricAgent {
             .into_inner();
         Ok(from_pb_enforcement(resp.enforced))
     }
+
+    async fn list_port_memberships(&self) -> Result<Vec<PortMembership>, FabricError> {
+        let resp = self
+            .client
+            .clone()
+            .list_port_memberships(Request::new(pb::ListPortMembershipsRequest {
+                vrf: String::new(),
+            }))
+            .await
+            .map_err(|s| Self::map_status(None, s))?
+            .into_inner();
+        Ok(resp
+            .memberships
+            .into_iter()
+            .map(|m| PortMembership {
+                port: m.port,
+                vrf: (!m.vrf.is_empty()).then_some(m.vrf),
+                ..PortMembership::default()
+            })
+            .collect())
+    }
 }

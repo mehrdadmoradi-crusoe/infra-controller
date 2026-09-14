@@ -1,0 +1,85 @@
+# TLS and mTLS for the fabric agent in the local kind demo (tracker gap A4).
+#
+# The agent presents a certificate from the cluster's local CA (the same
+# cert-manager Issuer that signs nico-api) and requires clients to present one
+# too; on top of the chain check it accepts only nico-api's SPIFFE id. nico-api
+# trusts the same CA bundle it already mounts (nico-roots) and authenticates
+# with the SPIFFE certificate it already has.
+#
+# Apply after fabric-agent.yaml:
+#   kubectl apply -n nico-system -f dev/deployment/devspace/fabric-agent-tls.yaml
+# then on the nico-api side (values.local.yaml or the site ConfigMap):
+#   [fabric.agent]
+#   endpoint = "https://fabric-agent.nico-system.svc.cluster.local:7443"
+#   ca_file = "/var/run/secrets/nico-roots/ca.crt"
+#   client_cert_file = "/var/run/secrets/spiffe.io/tls.crt"
+#   client_key_file = "/var/run/secrets/spiffe.io/tls.key"
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fabric-agent-certificate
+  namespace: nico-system
+spec:
+  secretName: fabric-agent-certificate
+  commonName: fabric-agent.nico-system.svc.cluster.local
+  dnsNames:
+    - fabric-agent.nico-system.svc.cluster.local
+    - fabric-agent.nico-system
+  uris:
+    - spiffe://nico.local/nico-system/sa/fabric-agent
+  duration: 720h0m0s
+  renewBefore: 360h0m0s
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: local-ca-issuer
+---
+# Strategic-merge patch for the Deployment in fabric-agent.yaml:
+#   kubectl patch deploy fabric-agent -n nico-system --patch-file <(yq 'select(document_index == 1)' dev/deployment/devspace/fabric-agent-tls.yaml)
+# or edit fabric-agent.yaml to carry these args, mounts and volumes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fabric-agent
+  namespace: nico-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: fabric-agent
+          args:
+            - "--config"
+            - "/etc/fabric-agent/fabric-agent.toml"
+            - "--listen"
+            - "0.0.0.0:7443"
+            - "--tls-cert"
+            - "/etc/fabric-agent/tls/tls.crt"
+            - "--tls-key"
+            - "/etc/fabric-agent/tls/tls.key"
+            - "--client-ca"
+            - "/etc/fabric-agent/roots/ca.crt"
+            - "--allowed-client-uri"
+            - "spiffe://nico.local/nico-system/sa/nico-api"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fabric-agent
+              readOnly: true
+            - name: tls
+              mountPath: /etc/fabric-agent/tls
+              readOnly: true
+            - name: roots
+              mountPath: /etc/fabric-agent/roots
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: fabric-agent-config
+        - name: tls
+          secret:
+            secretName: fabric-agent-certificate
+        - name: roots
+          secret:
+            secretName: nico-roots

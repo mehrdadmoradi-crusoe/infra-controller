@@ -23,30 +23,39 @@
 use mockito::{Matcher, Server, ServerGuard};
 use serde_json::json;
 
-use crate::{EdaFabric, FabricConfig, FabricError, FabricOperations, VrfIntent};
+use crate::{
+    EdaFabric, FabricConfig, FabricError, FabricOperations, PortContract, PortMembership,
+    VrfIntent, Witnesses,
+};
 
 const TOKEN_PATH: &str = "/core/httpproxy/v1/keycloak/realms/eda/protocol/openid-connect/token";
 const NS: &str = "ns";
 
 async fn eda_against(server: &ServerGuard) -> EdaFabric {
-    // The adapter reads its secrets from the environment by design (they never
-    // live in the site config). Both values are shared by every test in this
-    // file, so racing set_var calls write the same bytes.
+    eda_with(server, json!({}), None).await
+}
+
+/// An adapter with extra `[fabric.eda]` fields and an optional quarantine VPC.
+async fn eda_with(
+    server: &ServerGuard,
+    extra: serde_json::Value,
+    quarantine_vpc: Option<&str>,
+) -> EdaFabric {
     unsafe {
         std::env::set_var(crate::eda::PASSWORD_ENV, "pw");
         std::env::set_var(crate::eda::CLIENT_SECRET_ENV, "secret");
     }
+    let mut eda = json!({"api_url": server.url(), "username": "admin"});
+    if let (Some(base), Some(more)) = (eda.as_object_mut(), extra.as_object()) {
+        for (k, v) in more {
+            base.insert(k.clone(), v.clone());
+        }
+    }
     let cfg = FabricConfig {
         enabled: true,
         namespace: NS.to_string(),
-        eda: Some(
-            serde_json::from_value(json!({
-                "api_url": server.url(),
-                "username": "admin",
-                "insecure_skip_tls_verify": false,
-            }))
-            .expect("EdaConfig"),
-        ),
+        eda: Some(serde_json::from_value(eda).expect("EdaConfig")),
+        quarantine_vpc: quarantine_vpc.map(str::to_string),
         ..FabricConfig::default()
     };
     EdaFabric::try_default(&cfg).await.expect("construct")
@@ -319,5 +328,346 @@ async fn unreachable_controller_at_construction_does_not_fail_startup() {
     assert!(
         eda.list_vrfs().await.is_err(),
         "calls fail per pass instead"
+    );
+}
+
+fn iface_path(name: &str) -> String {
+    format!("/apps/interfaces.eda.nokia.com/v1/namespaces/{NS}/interfaces/{name}")
+}
+
+/// A fabric-owned `Interface` as EDA returns it, with the host-facing member.
+fn interface(name: &str, label: Option<&str>, node: &str, node_if: &str) -> serde_json::Value {
+    let mut labels = json!({"eda.nokia.com/role": "Edge"});
+    if let Some(l) = label {
+        labels["nico.io/vpc"] = json!(l);
+    }
+    json!({
+        "metadata": {"name": name, "namespace": NS, "labels": labels},
+        "spec": {"enabled": true, "encapType": "Dot1q", "ethernet": {"stormControl": {}}, "lldp": true,
+                 "members": [{"node": node, "interface": node_if.replace('/', "-")}]},
+        "status": {"members": [{"node": node, "nodeInterface": node_if, "operationalState": "Up", "neighbors": []}],
+                   "operationalState": "Up"}
+    })
+}
+
+fn mac_row(node: &str, destination: &str, mac: &str) -> serde_json::Value {
+    json!({".namespace.name": NS, ".namespace.node.name": node,
+           ".namespace.node.srl.network-instance.name": "nico-provisioning-bd",
+           "address": mac, "destination": destination, "destination-type": "sub-interface", "type": "learnt"})
+}
+
+async fn eql_mock(server: &mut ServerGuard, rows: Vec<serde_json::Value>) -> mockito::Mock {
+    server
+        .mock("GET", "/core/query/v1/eql")
+        .match_query(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json!({"data": rows}).to_string())
+        .create_async()
+        .await
+}
+
+const PORT: &str = "leaf1-ethernet-1-3";
+const HOST_MAC: &str = "06:00:00:00:05:01";
+
+#[tokio::test]
+async fn capabilities_follow_the_configuration() {
+    let mut server = Server::new_async().await;
+    token_mock(&mut server, 2).await;
+    let plain = eda_against(&server).await;
+    let c = plain.capabilities().await.expect("caps");
+    assert_eq!(c.adapter, "eda");
+    assert!(!c.quarantine_vrf && c.mac_witness && c.lldp_witness && c.storm_control);
+    assert!(
+        !c.peering && !c.mac_limit && !c.ip_source_guard && !c.dhcp_snooping && !c.isolated_ports
+    );
+    let configured = eda_with(&server, json!({"witness": "off"}), Some("provisioning")).await;
+    let c = configured.capabilities().await.expect("caps");
+    assert!(c.quarantine_vrf && !c.mac_witness && !c.lldp_witness);
+}
+
+#[tokio::test]
+async fn quarantine_moves_the_port_to_the_quarantine_label_and_is_listed_as_none() {
+    let mut server = Server::new_async().await;
+    token_mock(&mut server, 1).await;
+    server
+        .mock("GET", iface_path(PORT).as_str())
+        .with_status(200)
+        .with_body(interface(PORT, Some("nico-x"), "leaf1", "ethernet-1/3").to_string())
+        .create_async()
+        .await;
+    let relabel = server
+        .mock("PATCH", iface_path(PORT).as_str())
+        .match_header("content-type", "application/json-patch+json")
+        .match_body(Matcher::Regex(r#""value":"nico-provisioning""#.into()))
+        .with_status(200)
+        .with_body("{}")
+        .expect(1)
+        .create_async()
+        .await;
+    // Listing: one port in quarantine, one in a tenant VRF this process named.
+    server
+        .mock("GET", "/apps/interfaces.eda.nokia.com/v1/namespaces/ns/interfaces")
+        .match_query(Matcher::UrlEncoded("labelSelector".into(), "nico.io/vpc".into()))
+        .with_status(200)
+        .with_body(json!({"items": [
+            interface(PORT, Some("nico-provisioning"), "leaf1", "ethernet-1/3"),
+            interface("leaf2-ethernet-1-3", Some("nico-openai-training"), "leaf2", "ethernet-1/3"),
+        ]}).to_string())
+        .create_async()
+        .await;
+
+    let eda = eda_with(&server, json!({}), Some("provisioning")).await;
+    eda.set_port_membership(&PortMembership {
+        port: PORT.into(),
+        vrf: None,
+        previous_vrf: Some("x".into()),
+        ..PortMembership::default()
+    })
+    .await
+    .expect("quarantine ok");
+    relabel.assert();
+
+    // Names this process has not seen are handed back as EDA spells them
+    // (the reconcile learns NICo's spelling from ensure_vrf in the same pass).
+    let listed = eda.list_port_memberships().await.expect("list");
+    let q = listed
+        .iter()
+        .find(|m| m.port == PORT)
+        .expect("quarantined port listed");
+    assert!(q.vrf.is_none(), "quarantine label lists as None: {q:?}");
+    let t = listed
+        .iter()
+        .find(|m| m.port == "leaf2-ethernet-1-3")
+        .expect("tenant port listed");
+    assert_eq!(t.vrf.as_deref(), Some("nico-openai-training"));
+}
+
+#[tokio::test]
+async fn witness_mismatch_is_refused_and_writes_nothing() {
+    let mut server = Server::new_async().await;
+    token_mock(&mut server, 1).await;
+    server
+        .mock("GET", iface_path(PORT).as_str())
+        .with_status(200)
+        .with_body(interface(PORT, Some("nico-provisioning"), "leaf1", "ethernet-1/3").to_string())
+        .create_async()
+        .await;
+    // The leaf learned a different host on ethernet-1/3 (and an unrelated one elsewhere).
+    eql_mock(
+        &mut server,
+        vec![
+            mac_row("leaf1", "ethernet-1/3.900", "AA:BB:CC:DD:EE:FF"),
+            mac_row("leaf1", "ethernet-1/5.900", HOST_MAC),
+        ],
+    )
+    .await;
+    let writes = no_writes(&mut server, "/apps/.*").await;
+
+    let eda = eda_with(&server, json!({}), Some("provisioning")).await;
+    let err = eda
+        .set_port_membership(&PortMembership {
+            port: PORT.into(),
+            vrf: Some("x".into()),
+            previous_vrf: None,
+            witnesses: Witnesses {
+                expected_macs: vec![HOST_MAC.into()],
+                expected_lldp: None,
+            },
+            contract: PortContract::default(),
+        })
+        .await
+        .expect_err("refused");
+    match err {
+        FabricError::WitnessMismatch { port, detail } => {
+            assert_eq!(port, PORT);
+            assert!(
+                detail.contains("aa:bb:cc:dd:ee:ff") && detail.contains("ethernet-1/3"),
+                "{detail}"
+            );
+        }
+        other => panic!("expected WitnessMismatch, got {other}"),
+    }
+    for w in writes {
+        w.assert();
+    }
+}
+
+#[tokio::test]
+async fn nothing_learned_yet_is_refused_until_the_host_speaks() {
+    let mut server = Server::new_async().await;
+    token_mock(&mut server, 1).await;
+    server
+        .mock("GET", iface_path(PORT).as_str())
+        .with_status(200)
+        .with_body(interface(PORT, None, "leaf1", "ethernet-1/3").to_string())
+        .create_async()
+        .await;
+    eql_mock(&mut server, vec![]).await;
+    let eda = eda_against(&server).await;
+    let err = eda
+        .set_port_membership(&PortMembership {
+            port: PORT.into(),
+            vrf: Some("x".into()),
+            witnesses: Witnesses {
+                expected_macs: vec![HOST_MAC.into()],
+                expected_lldp: None,
+            },
+            ..PortMembership::default()
+        })
+        .await
+        .expect_err("refused");
+    assert!(matches!(err, FabricError::WitnessMismatch { .. }), "{err}");
+    assert!(err.to_string().contains("learned no MAC"), "{err}");
+}
+
+#[tokio::test]
+async fn witness_match_binds_the_port_and_applies_storm_control() {
+    let mut server = Server::new_async().await;
+    token_mock(&mut server, 1).await;
+    server
+        .mock("GET", iface_path(PORT).as_str())
+        .with_status(200)
+        .with_body(interface(PORT, Some("nico-provisioning"), "leaf1", "ethernet-1/3").to_string())
+        .create_async()
+        .await;
+    eql_mock(
+        &mut server,
+        vec![mac_row("leaf1", "ethernet-1/3.900", HOST_MAC)],
+    )
+    .await;
+    let relabel = server
+        .mock("PATCH", iface_path(PORT).as_str())
+        .match_body(Matcher::Regex(
+            r#"/metadata/labels/nico.io~1vpc.*"value":"nico-x""#.into(),
+        ))
+        .with_status(200)
+        .with_body("{}")
+        .expect(1)
+        .create_async()
+        .await;
+    let storm = server
+        .mock("PATCH", iface_path(PORT).as_str())
+        .match_body(Matcher::Regex(
+            r#"/spec/ethernet/stormControl.*"unit":"BandwidthPercentage""#.into(),
+        ))
+        .with_status(200)
+        .with_body("{}")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let eda = eda_with(&server, json!({}), Some("provisioning")).await;
+    let enforced = eda
+        .set_port_membership(&PortMembership {
+            port: PORT.into(),
+            vrf: Some("x".into()),
+            previous_vrf: None,
+            witnesses: Witnesses {
+                expected_macs: vec![HOST_MAC.to_ascii_uppercase()],
+                expected_lldp: None,
+            },
+            contract: PortContract {
+                allowed_macs: vec![HOST_MAC.into()],
+                storm_control: true,
+                ..PortContract::default()
+            },
+        })
+        .await
+        .expect("bound");
+    assert!(enforced.storm_control, "storm control reported as enforced");
+    assert!(
+        !enforced.mac_limit && !enforced.ip_source_guard,
+        "nothing else claimed"
+    );
+    relabel.assert();
+    storm.assert();
+}
+
+#[tokio::test]
+async fn witness_policy_log_binds_despite_mismatch() {
+    let mut server = Server::new_async().await;
+    token_mock(&mut server, 1).await;
+    server
+        .mock("GET", iface_path(PORT).as_str())
+        .with_status(200)
+        .with_body(interface(PORT, None, "leaf1", "ethernet-1/3").to_string())
+        .create_async()
+        .await;
+    eql_mock(
+        &mut server,
+        vec![mac_row("leaf1", "ethernet-1/3.900", "AA:BB:CC:DD:EE:FF")],
+    )
+    .await;
+    let relabel = server
+        .mock("PATCH", iface_path(PORT).as_str())
+        .with_status(200)
+        .with_body("{}")
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let eda = eda_with(&server, json!({"witness": "log"}), None).await;
+    eda.set_port_membership(&PortMembership {
+        port: PORT.into(),
+        vrf: Some("x".into()),
+        witnesses: Witnesses {
+            expected_macs: vec![HOST_MAC.into()],
+            expected_lldp: None,
+        },
+        ..PortMembership::default()
+    })
+    .await
+    .expect("bound under log policy");
+    relabel.assert();
+}
+
+#[tokio::test]
+async fn lldp_witness_compares_switch_identity_and_port() {
+    let mut server = Server::new_async().await;
+    token_mock(&mut server, 1).await;
+    server
+        .mock("GET", iface_path(PORT).as_str())
+        .with_status(200)
+        .with_body(interface(PORT, None, "leaf1", "ethernet-1/3").to_string())
+        .create_async()
+        .await;
+    // Only the LLDP query runs (no MAC witnesses given): the leaf's chassis id.
+    eql_mock(
+        &mut server,
+        vec![json!({".namespace.node.name": "leaf1", "chassis-id": "02:54:B5:FF:00:11"})],
+    )
+    .await;
+    let eda = eda_against(&server).await;
+    let wrong = eda
+        .set_port_membership(&PortMembership {
+            port: PORT.into(),
+            vrf: Some("x".into()),
+            witnesses: Witnesses {
+                expected_macs: vec![],
+                expected_lldp: Some(("leaf2".into(), "ethernet-1/3".into())),
+            },
+            ..PortMembership::default()
+        })
+        .await
+        .expect_err("host saw a different switch");
+    assert!(
+        matches!(wrong, FabricError::WitnessMismatch { .. }),
+        "{wrong}"
+    );
+    let wrong_port = eda
+        .set_port_membership(&PortMembership {
+            port: PORT.into(),
+            vrf: Some("x".into()),
+            witnesses: Witnesses {
+                expected_macs: vec![],
+                expected_lldp: Some(("02:54:b5:ff:00:11".into(), "ethernet-1/7".into())),
+            },
+            ..PortMembership::default()
+        })
+        .await
+        .expect_err("host saw a different port");
+    assert!(
+        matches!(wrong_port, FabricError::WitnessMismatch { .. }),
+        "{wrong_port}"
     );
 }

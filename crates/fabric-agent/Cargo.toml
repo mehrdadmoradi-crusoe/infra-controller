@@ -32,6 +32,7 @@ toml = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+x509-parser = { workspace = true }
 
 [lints]
 workspace = true

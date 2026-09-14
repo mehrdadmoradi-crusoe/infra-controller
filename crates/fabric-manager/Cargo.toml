@@ -20,6 +20,7 @@ carbide-api-model = { path = "../api-model", default-features = false }
 carbide-api-db = { path = "../api-db" }
 carbide-network = { path = "../network" }
 carbide-uuid = { path = "../uuid" }
+carbide-health-report = { path = "../health-report" }
 
 async-trait = { workspace = true }
 eyre = { workspace = true }

@@ -29,7 +29,7 @@
 //! through routing policies, not as a permit list between two VRFs. `peer_vpcs`
 //! returns an explicit error so the reconcile logs it and carries on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,7 +37,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::{FabricConfig, FabricError, FabricOperations, HostAttachment, VrfIntent};
+use crate::{
+    Capabilities, Enforcement, FabricConfig, FabricError, FabricOperations, HostAttachment,
+    PortMembership, VrfIntent,
+};
 
 const SERVICES_GV: &str = "services.eda.nokia.com/v2";
 const INTERFACES_GV: &str = "interfaces.eda.nokia.com/v1";
@@ -68,6 +71,71 @@ pub struct EdaConfig {
     /// Accept the EDA API's certificate without verification (lab use only).
     #[serde(default)]
     pub insecure_skip_tls_verify: bool,
+    /// What to do when the switch's view of a port disagrees with NICo's
+    /// witnesses (learned MACs, LLDP) on a move into a tenant VRF.
+    #[serde(default)]
+    pub witness: WitnessPolicy,
+    /// Storm control applied to a port while it is in a tenant VRF and the
+    /// port contract asks for it. Rates are per `unit`.
+    #[serde(default)]
+    pub storm_control: StormControlConfig,
+}
+
+/// Witness handling on `set_port_membership` into a tenant VRF.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WitnessPolicy {
+    /// Refuse the move (`WitnessMismatch`) when the switch has learned MACs on
+    /// the port and none is expected, or when the LLDP identity differs, or when
+    /// nothing has been learned yet. NICo retries every pass.
+    #[default]
+    Enforce,
+    /// Evaluate and log a mismatch, then bind anyway. For bring-up.
+    Log,
+    /// Do not query switch state; the adapter declares no witness capability.
+    Off,
+}
+
+/// Storm-control rates written to the EDA `Interface` (`spec.ethernet.stormControl`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StormControlConfig {
+    #[serde(default = "StormControlConfig::default_unit")]
+    pub unit: String,
+    #[serde(default = "StormControlConfig::default_rate")]
+    pub broadcast_rate: u32,
+    #[serde(default = "StormControlConfig::default_rate")]
+    pub multicast_rate: u32,
+    #[serde(default = "StormControlConfig::default_rate")]
+    pub unknown_unicast_rate: u32,
+}
+
+impl StormControlConfig {
+    fn default_unit() -> String {
+        "BandwidthPercentage".to_string()
+    }
+    const fn default_rate() -> u32 {
+        1
+    }
+    fn spec(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": true,
+            "unit": self.unit,
+            "broadcastRate": self.broadcast_rate,
+            "multicastRate": self.multicast_rate,
+            "unknownUnicastRate": self.unknown_unicast_rate,
+        })
+    }
+}
+
+impl Default for StormControlConfig {
+    fn default() -> Self {
+        Self {
+            unit: Self::default_unit(),
+            broadcast_rate: Self::default_rate(),
+            multicast_rate: Self::default_rate(),
+            unknown_unicast_rate: Self::default_rate(),
+        }
+    }
 }
 
 impl EdaConfig {
@@ -90,6 +158,12 @@ pub struct EdaFabric {
     password: String,
     client_secret: String,
     token: Arc<Mutex<Option<(String, Instant)>>>,
+    /// EDA-side name of the quarantine VRF (`[fabric] quarantine_vpc`), when
+    /// configured. Ports not in a tenant VRF carry this label.
+    quarantine: Option<String>,
+    /// EDA object name -> NICo VPC name, learned from the intents NICo sends
+    /// (`eda_name` is not invertible). Listings hand NICo its own names back.
+    names: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
 
 impl std::fmt::Debug for EdaFabric {
@@ -130,6 +204,8 @@ impl EdaFabric {
             password,
             client_secret,
             token: Arc::new(Mutex::new(None)),
+            quarantine: cfg.quarantine_vpc.as_deref().map(Self::eda_name),
+            names: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         };
         // Probe EDA once so a misconfiguration shows up in the startup log, but
         // never let the fabric controller keep the control plane from starting:
@@ -405,6 +481,215 @@ impl EdaFabric {
 
     /// BridgeDomain name derived from the Router name; kept distinct because both
     /// become SR Linux network-instances (see `ensure_vrf`). Stays within 63 chars.
+    /// Run an EDA Query Language (EQL) state query and return its rows.
+    async fn eql(&self, query: &str) -> Result<Vec<serde_json::Value>, FabricError> {
+        let url = format!(
+            "{}/core/query/v1/eql",
+            self.cfg.api_url.trim_end_matches('/')
+        );
+        let resp = self
+            .send(|| self.http.get(&url).query(&[("query", query)]))
+            .await?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            return Err(FabricError::Eda(format!(
+                "EQL {query}: {s}: {}",
+                resp.text().await.unwrap_or_default()
+            )));
+        }
+        let v: serde_json::Value = resp.json().await?;
+        Ok(v.get("data")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// (node, node-specific interface name) of a fabric `Interface` object,
+    /// from its status; e.g. `("leaf1", "ethernet-1/3")`.
+    fn interface_member(iface: &serde_json::Value) -> Option<(String, String)> {
+        let m = iface.pointer("/status/members/0")?;
+        Some((
+            m.get("node")?.as_str()?.to_string(),
+            m.get("nodeInterface")?.as_str()?.to_string(),
+        ))
+    }
+
+    /// MACs the leaf has learned on any sub-interface of `node_interface`,
+    /// lower-cased. Read from the bridge tables through EDA's state aggregator.
+    async fn learned_macs(
+        &self,
+        node: &str,
+        node_interface: &str,
+    ) -> Result<BTreeSet<String>, FabricError> {
+        let q = format!(
+            ".namespace.node.srl.network-instance.bridge-table.mac-table.mac \
+             where (.namespace.name = \"{}\" and .namespace.node.name = \"{}\")",
+            self.namespace, node
+        );
+        let prefix = format!("{node_interface}.");
+        Ok(self
+            .eql(&q)
+            .await?
+            .into_iter()
+            .filter(|row| {
+                row.get("destination")
+                    .and_then(|d| d.as_str())
+                    .map(|d| d.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .filter_map(|row| {
+                row.get("address")
+                    .and_then(|a| a.as_str())
+                    .map(|a| a.to_ascii_lowercase())
+            })
+            .collect())
+    }
+
+    /// The leaf's own LLDP chassis id, for the LLDP witness.
+    async fn node_chassis_id(&self, node: &str) -> Result<Option<String>, FabricError> {
+        let q = format!(
+            ".namespace.node.srl.system.lldp \
+             where (.namespace.name = \"{}\" and .namespace.node.name = \"{}\")",
+            self.namespace, node
+        );
+        Ok(self.eql(&q).await?.into_iter().find_map(|row| {
+            row.get("chassis-id")
+                .and_then(|c| c.as_str())
+                .map(|c| c.to_ascii_lowercase())
+        }))
+    }
+
+    /// Port names differ in punctuation between sources (`ethernet-1/3`,
+    /// `ethernet-1-3`, `Ethernet1/3`); compare them loosely.
+    fn same_port(a: &str, b: &str) -> bool {
+        let norm = |x: &str| {
+            x.to_ascii_lowercase()
+                .replace(['-', '/', '_', ' '], "")
+        };
+        norm(a) == norm(b)
+    }
+
+    /// Evaluate NICo's witnesses against what the leaf sees on the port.
+    async fn check_witnesses(
+        &self,
+        m: &PortMembership,
+        node: &str,
+        node_interface: &str,
+    ) -> Result<(), FabricError> {
+        if self.cfg.witness == WitnessPolicy::Off {
+            return Ok(());
+        }
+        let mut problems: Vec<String> = Vec::new();
+        if !m.witnesses.expected_macs.is_empty() {
+            let expected: BTreeSet<String> = m
+                .witnesses
+                .expected_macs
+                .iter()
+                .map(|x| x.to_ascii_lowercase())
+                .collect();
+            let learned = self.learned_macs(node, node_interface).await?;
+            if learned.is_empty() {
+                problems.push(format!(
+                    "{node} has learned no MAC on {node_interface} yet (expected one of {expected:?})"
+                ));
+            } else if expected.intersection(&learned).next().is_none() {
+                problems.push(format!(
+                    "expected one of {expected:?}, {node} learned {learned:?} on {node_interface}"
+                ));
+            }
+        }
+        if let Some((chassis, port)) = &m.witnesses.expected_lldp {
+            let want_chassis = chassis.to_ascii_lowercase();
+            let node_ok = want_chassis == node.to_ascii_lowercase()
+                || self.node_chassis_id(node).await?.as_deref() == Some(want_chassis.as_str());
+            if !node_ok || !Self::same_port(port, node_interface) {
+                problems.push(format!(
+                    "host reported LLDP neighbor ({chassis}, {port}), cabling record says ({node}, {node_interface})"
+                ));
+            }
+        }
+        if problems.is_empty() {
+            return Ok(());
+        }
+        let detail = problems.join("; ");
+        match self.cfg.witness {
+            WitnessPolicy::Enforce => Err(FabricError::WitnessMismatch {
+                port: m.port.clone(),
+                detail,
+            }),
+            WitnessPolicy::Log | WitnessPolicy::Off => {
+                tracing::warn!(port = %m.port, %detail, "fabric(eda): witness mismatch (policy: log)");
+                Ok(())
+            }
+        }
+    }
+
+    /// Set or clear storm control on a fabric `Interface`. JSON Patch on the
+    /// `spec.ethernet.stormControl` object only; one transaction when it changes.
+    async fn set_storm_control(
+        &self,
+        interface: &str,
+        current: &serde_json::Value,
+        enable: bool,
+    ) -> Result<bool, FabricError> {
+        let want = if enable {
+            self.cfg.storm_control.spec()
+        } else {
+            serde_json::json!({})
+        };
+        let have = current
+            .pointer("/spec/ethernet/stormControl")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let enabled_now = have.get("enabled") == Some(&serde_json::json!(true));
+        let same = if enable {
+            match (have.as_object(), want.as_object()) {
+                (Some(h), Some(w)) => w.iter().all(|(k, v)| h.get(k) == Some(v)),
+                _ => false,
+            }
+        } else {
+            !enabled_now
+        };
+        if same {
+            return Ok(enable);
+        }
+        let patch = serde_json::json!([{ "op": "add", "path": "/spec/ethernet/stormControl", "value": want }]);
+        let url = self.url(INTERFACES_GV, "interfaces", Some(interface));
+        let resp = self
+            .send(|| {
+                self.http
+                    .patch(&url)
+                    .header("Content-Type", "application/json-patch+json")
+                    .json(&patch)
+            })
+            .await?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            return Err(FabricError::Eda(format!(
+                "PATCH interface {interface} stormControl: {s}: {}",
+                resp.text().await.unwrap_or_default()
+            )));
+        }
+        Ok(enable)
+    }
+
+    fn remember_name(&self, eda: &str, nico: &str) {
+        self.names
+            .lock()
+            .expect("eda name map poisoned")
+            .insert(eda.to_string(), nico.to_string());
+    }
+
+    /// NICo's name for an EDA object name, when this process has seen it.
+    fn nico_name(&self, eda: &str) -> String {
+        self.names
+            .lock()
+            .expect("eda name map poisoned")
+            .get(eda)
+            .cloned()
+            .unwrap_or_else(|| eda.to_string())
+    }
+
     fn bd_name(router_name: &str) -> String {
         let base: String = router_name.chars().take(60).collect();
         format!("{base}-bd")
@@ -426,6 +711,7 @@ impl EdaFabric {
 impl FabricOperations for EdaFabric {
     async fn ensure_vrf(&self, intent: &VrfIntent) -> Result<(), FabricError> {
         let name = Self::eda_name(&intent.name);
+        self.remember_name(&name, &intent.name);
         // SR Linux renders both a Router (ip-vrf) and a BridgeDomain (mac-vrf) as
         // a `network-instance` keyed by the EDA object name, so the two must not
         // share one: the leaf rejects the config with a type conflict otherwise.
@@ -562,7 +848,8 @@ impl FabricOperations for EdaFabric {
             return Ok(());
         }
         tracing::info!(vrf = %vrf, interface = %att.connection, "fabric(eda): detach_host");
-        self.label_interface(&att.connection, None).await
+        self.label_interface(&att.connection, self.quarantine.as_deref())
+            .await
     }
 
     async fn peer_vpcs(&self, a: &str, b: &str) -> Result<(), FabricError> {
@@ -613,7 +900,8 @@ impl FabricOperations for EdaFabric {
             .await?
         {
             if let Some(n) = i.pointer("/metadata/name").and_then(|v| v.as_str()) {
-                self.label_interface(n, None).await?;
+                let to = self.quarantine.as_deref().filter(|q| *q != name.as_str());
+                self.label_interface(n, to).await?;
             }
         }
         let bd_name = Self::bd_name(&name);
@@ -627,6 +915,110 @@ impl FabricOperations for EdaFabric {
             self.delete(SERVICES_GV, plural, obj).await?;
         }
         Ok(())
+    }
+
+    async fn capabilities(&self) -> Result<Capabilities, FabricError> {
+        let witness = self.cfg.witness != WitnessPolicy::Off;
+        Ok(Capabilities {
+            contract_version: carbide_fabric_agent_api::CONTRACT_VERSION.to_string(),
+            adapter: "eda".to_string(),
+            // A Router has one import target; pairwise leak needs a Policy design.
+            peering: false,
+            // Per-port MAC limits, source guard, snooping and isolation have no
+            // EDA service model on SR Linux; reported honestly as absent.
+            mac_limit: false,
+            ip_source_guard: false,
+            dhcp_snooping: false,
+            storm_control: true,
+            isolated_ports: false,
+            anycast_gateway: true,
+            vlan_translation: false,
+            events: false,
+            lldp_witness: witness,
+            mac_witness: witness,
+            quarantine_vrf: self.quarantine.is_some(),
+        })
+    }
+
+    /// Bind the port's `Interface` to the VRF's VLAN by label after checking
+    /// the witnesses against the leaf's bridge table and LLDP state; apply
+    /// storm control when the contract asks for it. `vrf == None` moves the
+    /// port to the quarantine VRF (label) or, without one, unbinds it.
+    async fn set_port_membership(&self, m: &PortMembership) -> Result<Enforcement, FabricError> {
+        let Some(cur) = self.get(INTERFACES_GV, "interfaces", &m.port).await? else {
+            return Err(FabricError::Invalid(format!(
+                "interface {} does not exist on the fabric",
+                m.port
+            )));
+        };
+        let have = cur
+            .pointer("/metadata/labels")
+            .and_then(|l| l.get(VPC_LABEL))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        match &m.vrf {
+            Some(vrf) => {
+                let target = Self::eda_name(vrf);
+                self.remember_name(&target, vrf);
+                if let Some((node, node_if)) = Self::interface_member(&cur) {
+                    self.check_witnesses(m, &node, &node_if).await?;
+                } else if self.cfg.witness == WitnessPolicy::Enforce
+                    && (!m.witnesses.expected_macs.is_empty() || m.witnesses.expected_lldp.is_some())
+                {
+                    return Err(FabricError::WitnessMismatch {
+                        port: m.port.clone(),
+                        detail: format!("interface {} has no member in its status; cannot verify witnesses", m.port),
+                    });
+                }
+                if have.as_deref() != Some(target.as_str()) {
+                    tracing::info!(port = %m.port, vrf = %target, "fabric(eda): bind port");
+                    self.label_interface(&m.port, Some(&target)).await?;
+                }
+                let storm = self
+                    .set_storm_control(&m.port, &cur, m.contract.storm_control)
+                    .await?;
+                Ok(Enforcement {
+                    storm_control: storm,
+                    ..Enforcement::default()
+                })
+            }
+            None => {
+                let target = self.quarantine.clone();
+                if have != target {
+                    tracing::info!(port = %m.port, to = ?target, "fabric(eda): port to quarantine");
+                    self.label_interface(&m.port, target.as_deref()).await?;
+                }
+                // Storm control stays on in quarantine: the host is untrusted there too.
+                Ok(Enforcement::default())
+            }
+        }
+    }
+
+    /// Every labelled port: tenant VRF members plus quarantine members (`None`).
+    async fn list_port_memberships(&self) -> Result<Vec<PortMembership>, FabricError> {
+        Ok(self
+            .list(INTERFACES_GV, "interfaces", VPC_LABEL)
+            .await?
+            .into_iter()
+            .filter_map(|i| {
+                let port = i.pointer("/metadata/name")?.as_str()?.to_string();
+                let label = i
+                    .pointer("/metadata/labels")?
+                    .get(VPC_LABEL)?
+                    .as_str()?
+                    .to_string();
+                let vrf = if self.quarantine.as_deref() == Some(label.as_str()) {
+                    None
+                } else {
+                    Some(self.nico_name(&label))
+                };
+                Some(PortMembership {
+                    port,
+                    vrf,
+                    ..PortMembership::default()
+                })
+            })
+            .collect())
     }
 }
 

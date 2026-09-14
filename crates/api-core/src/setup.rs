@@ -1440,6 +1440,7 @@ async fn initialize_and_start_controllers<'a>(
             db_pool.clone(),
             carbide_config.fabric_manager.clone(),
         )
+        .with_quarantine_vpc(carbide_config.fabric.quarantine_vpc.clone())
         .start(join_set, cancel_token.clone());
     }
 

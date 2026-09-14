@@ -81,6 +81,7 @@ pub enum Call {
     DeleteVrf(String),
     ListVrfs,
     ListAttachments(String),
+    ListPortMemberships,
     SetPortMembership { port: String, vrf: Option<String> },
     PeerVrfs(String, String),
     GetVrfStatus(String),
@@ -92,6 +93,9 @@ struct State {
     vrfs: BTreeMap<String, FakeVrf>,
     /// port -> VRF; a port absent from the map is in quarantine.
     memberships: BTreeMap<String, String>,
+    /// Ports the fabric has explicitly placed in quarantine (so a listing can
+    /// report them and a converged reconcile stays quiet).
+    quarantined: BTreeSet<String>,
     enforced: BTreeMap<String, Enforcement>,
     observed: BTreeMap<String, Observed>,
     calls: Vec<Call>,
@@ -195,6 +199,15 @@ impl FakeFabric {
             .clone()
     }
 
+    /// Ports explicitly moved into quarantine (by detach, quarantine or delete).
+    pub fn quarantined(&self) -> BTreeSet<String> {
+        self.state
+            .lock()
+            .expect("fake fabric poisoned")
+            .quarantined
+            .clone()
+    }
+
     pub fn calls(&self) -> Vec<Call> {
         self.state
             .lock()
@@ -216,6 +229,7 @@ impl FakeFabric {
         let mut s = self.state.lock().expect("fake fabric poisoned");
         s.vrfs.clear();
         s.memberships.clear();
+        s.quarantined.clear();
         s.enforced.clear();
         s.calls.clear();
         s.fail_queue.clear();
@@ -385,7 +399,14 @@ impl FabricOperations for FakeFabric {
         self.enter(Call::DeleteVrf(vpc_name.to_string())).await?;
         let mut s = self.state.lock().expect("fake fabric poisoned");
         // Deleting a VRF returns its ports to quarantine and drops its peerings.
+        let freed: Vec<String> = s
+            .memberships
+            .iter()
+            .filter(|(_, v)| v.as_str() == vpc_name)
+            .map(|(p, _)| p.clone())
+            .collect();
         s.memberships.retain(|_, v| v.as_str() != vpc_name);
+        s.quarantined.extend(freed);
         for v in s.vrfs.values_mut() {
             v.peers.remove(vpc_name);
         }
@@ -419,6 +440,7 @@ impl FabricOperations for FakeFabric {
                 }
                 Self::check_witnesses(&s, m)?;
                 s.memberships.insert(m.port.clone(), vrf.clone());
+                s.quarantined.remove(&m.port);
                 let enforced = Enforcement {
                     mac_limit: !m.contract.allowed_macs.is_empty(),
                     ip_source_guard: !m.contract.allowed_ips.is_empty(),
@@ -433,9 +455,29 @@ impl FabricOperations for FakeFabric {
                 // Into quarantine: never refused, idempotent.
                 s.memberships.remove(&m.port);
                 s.enforced.remove(&m.port);
+                s.quarantined.insert(m.port.clone());
                 Ok(Enforcement::default())
             }
         }
+    }
+
+    async fn list_port_memberships(&self) -> Result<Vec<PortMembership>, FabricError> {
+        self.enter(Call::ListPortMemberships).await?;
+        let s = self.state.lock().expect("fake fabric poisoned");
+        let mut out: Vec<PortMembership> = s
+            .memberships
+            .iter()
+            .map(|(p, v)| PortMembership {
+                port: p.clone(),
+                vrf: Some(v.clone()),
+                ..PortMembership::default()
+            })
+            .collect();
+        out.extend(s.quarantined.iter().map(|p| PortMembership {
+            port: p.clone(),
+            ..PortMembership::default()
+        }));
+        Ok(out)
     }
 }
 
