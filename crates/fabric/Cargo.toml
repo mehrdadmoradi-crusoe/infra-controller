@@ -43,3 +43,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 mockall = { workspace = true, optional = true }
+
+[dev-dependencies]
+mockito = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

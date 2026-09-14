@@ -1421,6 +1421,10 @@ async fn initialize_and_start_controllers<'a>(
             // Production shape: an out-of-process fabric agent speaking the
             // fabric_agent.v1 contract. The channel is lazy so an unreachable
             // agent never blocks nico-api startup; the reconcile reports it per pass.
+            carbide_fabric::FabricBackend::Fake => {
+                tracing::warn!("fabric backend is the in-memory fake: nothing is programmed on any switch");
+                Arc::new(carbide_fabric::FakeFabric::new())
+            }
             carbide_fabric::FabricBackend::Agent => {
                 let agent_cfg = carbide_config.fabric.agent.as_ref().ok_or_else(|| {
                     eyre::eyre!("fabric.backend = \"agent\" requires a [fabric.agent] section")

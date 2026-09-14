@@ -10,6 +10,10 @@ authors.workspace = true
 # Runs next to the fabric, operated by the network team, holding the controller
 # credentials so NICo never does.
 
+[lib]
+name = "carbide_fabric_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fabric-agent"
 path = "src/main.rs"

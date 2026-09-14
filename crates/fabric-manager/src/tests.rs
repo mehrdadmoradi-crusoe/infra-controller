@@ -34,12 +34,18 @@ async fn seed_tor_vpc(
             id: vpc_id,
             tenant_organization_id: "tenant".to_string(),
             network_virtualization_type: VpcVirtualizationType::TorVrf,
-            metadata: Metadata { name: name.to_string(), ..Default::default() },
+            metadata: Metadata {
+                name: name.to_string(),
+                ..Default::default()
+            },
             network_security_group_id: None,
             routing_profile_type: None,
             vni,
         },
-        model::vpc::VpcStatus { vni: None, fabric: None },
+        model::vpc::VpcStatus {
+            vni: None,
+            fabric: None,
+        },
         conn,
     )
     .await?;
@@ -99,7 +105,10 @@ async fn seed_host_with_connection(
         conn,
         &machine_id,
         machine.version,
-        Metadata { labels, ..Default::default() },
+        Metadata {
+            labels,
+            ..Default::default()
+        },
     )
     .await?;
     Ok(machine_id)
@@ -131,9 +140,7 @@ async fn reconciles_vrf_and_peering(pool: sqlx::PgPool) -> eyre::Result<()> {
     // peering fires once, between the two ToR-VRF VPCs (order-agnostic).
     fabric
         .expect_peer_vpcs()
-        .withf(|a: &str, b: &str| {
-            (a == "tor-a" && b == "tor-b") || (a == "tor-b" && b == "tor-a")
-        })
+        .withf(|a: &str, b: &str| (a == "tor-a" && b == "tor-b") || (a == "tor-b" && b == "tor-a"))
         .times(1)
         .returning(|_, _| Ok(()));
     // no instances placed -> no host attachment.
@@ -159,13 +166,25 @@ async fn reconciles_vrf_and_peering(pool: sqlx::PgPool) -> eyre::Result<()> {
     }
     // Status persistence: tor-a reached ensure_vrf + get_vrf_status, so its
     // VpcStatus now carries what the fabric reported (tor-b skipped before that).
-    let a = db::vpc::find_by(&pool2, db::ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_a))
-        .await?
-        .pop()
-        .expect("tor-a still present");
-    let fs = a.status.fabric.expect("fabric status persisted after reconcile");
-    assert!(fs.programmed, "fabric reported a status object => programmed");
-    assert!(fs.detail.is_some(), "raw controller status retained for diagnosis");
+    let a = db::vpc::find_by(
+        &pool2,
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_a),
+    )
+    .await?
+    .pop()
+    .expect("tor-a still present");
+    let fs = a
+        .status
+        .fabric
+        .expect("fabric status persisted after reconcile");
+    assert!(
+        fs.programmed,
+        "fabric reported a status object => programmed"
+    );
+    assert!(
+        fs.detail.is_some(),
+        "raw controller status retained for diagnosis"
+    );
     Ok(())
 }
 
@@ -217,7 +236,7 @@ async fn attaches_host_from_connection_label(pool: sqlx::PgPool) -> eyre::Result
             nvlink_config_version: ConfigVersion::initial(),
             spx_config_version: ConfigVersion::initial(),
         }],
-        &mut *txn,
+        &mut txn,
     )
     .await?;
     sqlx::query(
@@ -329,7 +348,9 @@ async fn fabric_errors_are_isolated_and_not_fatal(pool: sqlx::PgPool) -> eyre::R
         .returning(|_| Ok(()));
     fabric.expect_get_vrf_status().returning(|_| Ok(None));
     // GC can't list the fabric either: it must degrade to a no-op, not fail the pass.
-    fabric.expect_list_vrfs().returning(move || Err(unreachable()));
+    fabric
+        .expect_list_vrfs()
+        .returning(move || Err(unreachable()));
     fabric.expect_attach_host().times(0).returning(|_| Ok(()));
     // nothing bound on the fabric either -> nothing to detach.
     fabric.expect_list_attachments().returning(|_| Ok(vec![]));
@@ -340,6 +361,165 @@ async fn fabric_errors_are_isolated_and_not_fatal(pool: sqlx::PgPool) -> eyre::R
     // No panic, no Err out of the pass: the healthy tenant counts, the failed one
     // is logged and skipped, and GC is skipped when the fabric can't be listed.
     assert_eq!(mgr.run_single_iteration().await?, 1);
+    Ok(())
+}
+
+/// Seed one live instance on `machine_id` addressed in `vpc`/`seg`; returns its id.
+async fn seed_instance(
+    txn: &mut sqlx::PgConnection,
+    machine_id: MachineId,
+    vpc: VpcId,
+    seg: &NetworkSegment,
+    addr: &str,
+) -> eyre::Result<InstanceId> {
+    let instance_id: InstanceId = uuid::Uuid::new_v4().into();
+    let cfg = model::instance::config::InstanceConfig {
+        tenant: model::instance::config::tenant_config::TenantConfig {
+            tenant_organization_id: "tenant".parse().unwrap(),
+            tenant_keyset_ids: vec![],
+            hostname: None,
+        },
+        os: model::os::OperatingSystem {
+            user_data: None,
+            variant: model::os::OperatingSystemVariant::OsImage(uuid::Uuid::new_v4()),
+            phone_home_enabled: false,
+            run_provisioning_instructions_on_every_boot: false,
+        },
+        network: Default::default(),
+        infiniband: Default::default(),
+        network_security_group_id: None,
+        extension_services: Default::default(),
+        nvlink: Default::default(),
+        spxconfig: Default::default(),
+    };
+    db::instance::batch_persist(
+        vec![model::instance::NewInstance {
+            instance_id,
+            machine_id,
+            instance_type_id: None,
+            config: &cfg,
+            metadata: Default::default(),
+            config_version: ConfigVersion::initial(),
+            network_config_version: ConfigVersion::initial(),
+            ib_config_version: ConfigVersion::initial(),
+            extension_services_config_version: ConfigVersion::initial(),
+            nvlink_config_version: ConfigVersion::initial(),
+            spx_config_version: ConfigVersion::initial(),
+        }],
+        &mut *txn,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO instance_addresses (instance_id, address, segment_id, prefix, vpc_id) \
+         VALUES ($1, $2::inet, $3, $4::cidr, $5)",
+    )
+    .bind(instance_id)
+    .bind(addr)
+    .bind(seg.id)
+    .bind(
+        seg.prefixes
+            .first()
+            .map(|p| p.prefix.to_string())
+            .unwrap_or_else(|| "10.10.0.0/24".into()),
+    )
+    .bind(vpc)
+    .execute(&mut *txn)
+    .await?;
+    Ok(instance_id)
+}
+
+/// The whole lifecycle against the in-memory fake instead of mocks: the fake's
+/// end state is asserted after every pass, so ordering and lifecycle bugs (like
+/// a released instance keeping its port) show up as state, not as a missing
+/// expectation.
+#[carbide_macros::sqlx_test]
+async fn lifecycle_converges_against_the_fake(pool: sqlx::PgPool) -> eyre::Result<()> {
+    let mut txn = pool.begin().await?;
+    let vpc = seed_tor_vpc(&mut txn, "life", Some(10042)).await?;
+    let seg = seed_hostinband_segment(&mut txn, vpc, 142, "10.42.0.0/24", "10.42.0.1").await?;
+    let machine_id = seed_host_with_connection(&mut txn, "leaf1-ethernet-1-3").await?;
+    txn.commit().await?;
+
+    let fake = carbide_fabric::FakeFabric::new();
+    let mgr = FabricManager::new(
+        Arc::new(fake.clone()),
+        pool.clone(),
+        FabricManagerConfig::default(),
+    );
+    async fn pass(mgr: &FabricManager) -> eyre::Result<()> {
+        for v in &mgr.list_tor_vrf_vpcs().await? {
+            mgr.reconcile_vpc(v)
+                .await
+                .map_err(|e| eyre::eyre!("reconcile {}: {e}", v.metadata.name))?;
+        }
+        Ok(())
+    }
+
+    // Pass 1: VRF exists, nothing attached (no instance).
+    pass(&mgr).await?;
+    let vrfs = fake.vrfs();
+    assert_eq!(vrfs.len(), 1);
+    assert_eq!(vrfs["life"].intent.vni, Some(10042));
+    assert_eq!(vrfs["life"].intent.vlan, 142);
+    assert!(fake.memberships().is_empty());
+
+    // Pass 2: an instance is placed -> port attached.
+    let mut txn = pool.begin().await?;
+    let inst = seed_instance(&mut txn, machine_id, vpc, &seg, "10.42.0.10").await?;
+    txn.commit().await?;
+    pass(&mgr).await?;
+    assert_eq!(
+        fake.memberships()
+            .get("leaf1-ethernet-1-3")
+            .map(String::as_str),
+        Some("life")
+    );
+
+    // Pass 3: steady state writes nothing.
+    fake.clear_calls();
+    pass(&mgr).await?;
+    assert_eq!(fake.vrfs()["life"].writes, 1, "no rewrite when converged");
+    assert!(
+        !fake.calls().iter().any(|c| matches!(
+            c,
+            carbide_fabric::fake::Call::SetPortMembership { vrf: None, .. }
+        )),
+        "nothing detached in steady state"
+    );
+
+    // Pass 4: instance released (soft-deleted) -> port leaves the tenant VRF.
+    sqlx::query("UPDATE instances SET deleted = now() WHERE id = $1")
+        .bind(inst)
+        .execute(&pool)
+        .await?;
+    pass(&mgr).await?;
+    assert!(
+        !fake.memberships().contains_key("leaf1-ethernet-1-3"),
+        "released host is unplaced"
+    );
+    assert_eq!(
+        fake.vrfs().len(),
+        1,
+        "the VRF itself stays while the VPC lives"
+    );
+
+    // Pass 5: a transient fabric failure on this pass is isolated and the next pass converges.
+    fake.fail_next(1, || carbide_fabric::FabricError::Agent("blip".into()));
+    let _ = pass(&mgr).await; // may error; must not panic or corrupt
+    pass(&mgr).await?;
+    assert_eq!(fake.vrfs().len(), 1);
+
+    // Pass 6: VPC deleted in NICo -> GC removes the VRF on the fabric.
+    sqlx::query("UPDATE vpcs SET deleted = now() WHERE id = $1")
+        .bind(vpc)
+        .execute(&pool)
+        .await?;
+    mgr.run_single_iteration().await?;
+    assert!(
+        fake.vrfs().is_empty(),
+        "GC removed the orphaned VRF: {:?}",
+        fake.vrfs().keys().collect::<Vec<_>>()
+    );
     Ok(())
 }
 
@@ -386,7 +566,7 @@ async fn detaches_port_of_a_released_instance(pool: sqlx::PgPool) -> eyre::Resul
             nvlink_config_version: ConfigVersion::initial(),
             spx_config_version: ConfigVersion::initial(),
         }],
-        &mut *txn,
+        &mut txn,
     )
     .await?;
     sqlx::query(

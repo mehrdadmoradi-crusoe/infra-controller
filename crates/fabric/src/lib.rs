@@ -19,13 +19,18 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 
 pub mod agent;
+pub mod conformance;
 pub mod eda;
+#[cfg(test)]
+mod eda_http_tests;
+pub mod fake;
 pub use agent::GrpcFabricAgent;
 pub use eda::EdaFabric;
+pub use fake::FakeFabric;
+use kube::Client;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams,
 };
-use kube::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -80,7 +85,13 @@ fn default_namespace() -> String {
 
 impl Default for FabricConfig {
     fn default() -> Self {
-        Self { enabled: false, namespace: default_namespace(), backend: FabricBackend::default(), eda: None, agent: None }
+        Self {
+            enabled: false,
+            namespace: default_namespace(),
+            backend: FabricBackend::default(),
+            eda: None,
+            agent: None,
+        }
     }
 }
 
@@ -95,6 +106,9 @@ pub enum FabricBackend {
     /// network team runs the agent next to the fabric and holds the controller
     /// credentials; NICo holds only its client identity.
     Agent,
+    /// The in-memory fake (`FakeFabric`): CI, integration tests and demos with
+    /// no controller at all. Models VRFs and ports, never packets.
+    Fake,
 }
 
 /// Connection details for `FabricBackend::Agent`.
@@ -247,7 +261,10 @@ pub trait FabricOperations: Send + Sync + std::fmt::Debug {
     /// Permit east-west between two tenant VPCs (Hedgehog `VPCPeering`).
     async fn peer_vpcs(&self, a: &str, b: &str) -> Result<(), FabricError>;
     /// Read back the programmed state of a VRF for reconciliation/status.
-    async fn get_vrf_status(&self, vpc_name: &str) -> Result<Option<serde_json::Value>, FabricError>;
+    async fn get_vrf_status(
+        &self,
+        vpc_name: &str,
+    ) -> Result<Option<serde_json::Value>, FabricError>;
     /// List NICo-managed VRFs on the fabric as `(hedgehog_vpc_name, nico_vpc_id)`,
     /// so the reconcile can garbage-collect VRFs whose NICo VPC is gone.
     async fn list_vrfs(&self) -> Result<Vec<(String, String)>, FabricError>;
@@ -304,7 +321,9 @@ pub struct HedgehogFabric {
 
 impl std::fmt::Debug for HedgehogFabric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HedgehogFabric").field("namespace", &self.namespace).finish()
+        f.debug_struct("HedgehogFabric")
+            .field("namespace", &self.namespace)
+            .finish()
     }
 }
 
@@ -316,7 +335,10 @@ const MAX_VPC_NAME: usize = 11;
 impl HedgehogFabric {
     pub async fn try_default(cfg: &FabricConfig) -> Result<Self, FabricError> {
         let client = Client::try_default().await?;
-        Ok(Self { client, namespace: cfg.namespace.clone() })
+        Ok(Self {
+            client,
+            namespace: cfg.namespace.clone(),
+        })
     }
 
     pub fn new(client: Client, namespace: String) -> Self {
@@ -336,16 +358,26 @@ impl HedgehogFabric {
         Api::namespaced_with(self.client.clone(), &self.namespace, &ar)
     }
 
-    async fn apply(&self, kind: &str, name: &str, labels: BTreeMap<String, String>,
-                   spec: serde_json::Value) -> Result<(), FabricError> {
+    async fn apply(
+        &self,
+        kind: &str,
+        name: &str,
+        labels: BTreeMap<String, String>,
+        spec: serde_json::Value,
+    ) -> Result<(), FabricError> {
         let gvk = GroupVersionKind::gvk(HH_GROUP, HH_VERSION, kind);
         let ar = ApiResource::from_gvk(&gvk);
         let mut obj = DynamicObject::new(name, &ar).within(&self.namespace);
         obj.metadata.labels = Some(labels);
         obj.data = serde_json::json!({ "spec": spec });
-        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), &self.namespace, &ar);
-        api.patch(name, &PatchParams::apply("carbide-fabric").force(), &Patch::Apply(&obj))
-            .await?;
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.namespace, &ar);
+        api.patch(
+            name,
+            &PatchParams::apply("carbide-fabric").force(),
+            &Patch::Apply(&obj),
+        )
+        .await?;
         Ok(())
     }
 
@@ -360,7 +392,10 @@ impl HedgehogFabric {
 
     fn nico_labels(nico_vpc_id: &str, vni: Option<u32>) -> BTreeMap<String, String> {
         let mut l = BTreeMap::new();
-        l.insert("nico.io/vpc-id".into(), nico_vpc_id.chars().take(63).collect());
+        l.insert(
+            "nico.io/vpc-id".into(),
+            nico_vpc_id.chars().take(63).collect(),
+        );
         if let Some(v) = vni {
             l.insert("nico.io/vni".into(), v.to_string());
         }
@@ -390,7 +425,13 @@ impl FabricOperations for HedgehogFabric {
             "subnets": { "default": subnet },
         });
         tracing::info!(vpc = %name, nico_id = %intent.nico_vpc_id, "fabric: ensure_vrf");
-        self.apply("VPC", &name, Self::nico_labels(&intent.nico_vpc_id, intent.vni), spec).await
+        self.apply(
+            "VPC",
+            &name,
+            Self::nico_labels(&intent.nico_vpc_id, intent.vni),
+            spec,
+        )
+        .await
     }
 
     async fn attach_host(&self, att: &HostAttachment) -> Result<(), FabricError> {
@@ -402,23 +443,30 @@ impl FabricOperations for HedgehogFabric {
             "subnet": format!("{}/default", vpc),
         });
         tracing::info!(vpc = %vpc, connection = %att.connection, "fabric: attach_host");
-        self.apply("VPCAttachment", &name, BTreeMap::new(), spec).await
+        self.apply("VPCAttachment", &name, BTreeMap::new(), spec)
+            .await
     }
 
     async fn list_attachments(&self, vpc_name: &str) -> Result<Vec<String>, FabricError> {
         let vpc = Self::hedgehog_vpc_name(vpc_name);
         let subnet_prefix = format!("{vpc}/");
         let mut out = Vec::new();
-        for a in self.api("VPCAttachment").list(&ListParams::default()).await? {
+        for a in self
+            .api("VPCAttachment")
+            .list(&ListParams::default())
+            .await?
+        {
             let spec = a.data.get("spec");
             let belongs = spec
                 .and_then(|s| s.get("subnet"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.starts_with(&subnet_prefix))
                 .unwrap_or(false);
-            if let (true, Some(conn)) =
-                (belongs, spec.and_then(|s| s.get("connection")).and_then(|v| v.as_str()))
-            {
+            if let (true, Some(conn)) = (
+                belongs,
+                spec.and_then(|s| s.get("connection"))
+                    .and_then(|v| v.as_str()),
+            ) {
                 out.push(conn.to_string());
             }
         }
@@ -427,7 +475,10 @@ impl FabricOperations for HedgehogFabric {
 
     async fn detach_host(&self, att: &HostAttachment) -> Result<(), FabricError> {
         let vpc = Self::hedgehog_vpc_name(&att.vpc_name);
-        let name: String = format!("{}--{}", att.connection, vpc).chars().take(253).collect();
+        let name: String = format!("{}--{}", att.connection, vpc)
+            .chars()
+            .take(253)
+            .collect();
         tracing::info!(vpc = %vpc, connection = %att.connection, "fabric: detach_host");
         self.delete_obj("VPCAttachment", &name).await
     }
@@ -445,7 +496,10 @@ impl FabricOperations for HedgehogFabric {
         self.apply("VPCPeering", &name, BTreeMap::new(), spec).await
     }
 
-    async fn get_vrf_status(&self, vpc_name: &str) -> Result<Option<serde_json::Value>, FabricError> {
+    async fn get_vrf_status(
+        &self,
+        vpc_name: &str,
+    ) -> Result<Option<serde_json::Value>, FabricError> {
         let name = Self::hedgehog_vpc_name(vpc_name);
         match self.api("VPC").get_opt(&name).await? {
             Some(o) => Ok(o.data.get("status").cloned()),
@@ -476,7 +530,11 @@ impl FabricOperations for HedgehogFabric {
         let vpc = Self::hedgehog_vpc_name(vpc_name);
         // Attachments reference the VPC via spec.subnet = "<vpc>/<subnet>".
         let subnet_prefix = format!("{vpc}/");
-        for a in self.api("VPCAttachment").list(&ListParams::default()).await? {
+        for a in self
+            .api("VPCAttachment")
+            .list(&ListParams::default())
+            .await?
+        {
             let belongs = a
                 .data
                 .get("spec")
@@ -484,10 +542,8 @@ impl FabricOperations for HedgehogFabric {
                 .and_then(|v| v.as_str())
                 .map(|s| s.starts_with(&subnet_prefix))
                 .unwrap_or(false);
-            if belongs {
-                if let Some(n) = a.metadata.name.as_deref() {
-                    self.delete_obj("VPCAttachment", n).await?;
-                }
+            if belongs && let Some(n) = a.metadata.name.as_deref() {
+                self.delete_obj("VPCAttachment", n).await?;
             }
         }
         // Peerings reference the VPC as a key in each spec.permit[] entry.
@@ -497,12 +553,14 @@ impl FabricOperations for HedgehogFabric {
                 .get("spec")
                 .and_then(|s| s.get("permit"))
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|e| e.as_object()).any(|m| m.contains_key(&vpc)))
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.as_object())
+                        .any(|m| m.contains_key(&vpc))
+                })
                 .unwrap_or(false);
-            if involves {
-                if let Some(n) = p.metadata.name.as_deref() {
-                    self.delete_obj("VPCPeering", n).await?;
-                }
+            if involves && let Some(n) = p.metadata.name.as_deref() {
+                self.delete_obj("VPCPeering", n).await?;
             }
         }
         tracing::info!(vpc = %vpc, "fabric: delete_vrf (VPC + attachments + peerings)");
@@ -516,7 +574,10 @@ mod tests {
 
     #[test]
     fn vpc_name_is_hedgehog_legal() {
-        assert_eq!(HedgehogFabric::hedgehog_vpc_name("openai-training"), "openai-trai");
+        assert_eq!(
+            HedgehogFabric::hedgehog_vpc_name("openai-training"),
+            "openai-trai"
+        );
         assert!(HedgehogFabric::hedgehog_vpc_name("a-very-long-vpc-name").len() <= MAX_VPC_NAME);
         assert_eq!(HedgehogFabric::hedgehog_vpc_name("frontend"), "frontend");
     }
@@ -532,6 +593,9 @@ mod tests {
     fn nico_labels_carry_traceability() {
         let l = HedgehogFabric::nico_labels("c247304e-bda9", Some(2024542));
         assert_eq!(l.get("nico.io/vni").map(String::as_str), Some("2024542"));
-        assert_eq!(l.get("nico.io/vpc-id").map(String::as_str), Some("c247304e-bda9"));
+        assert_eq!(
+            l.get("nico.io/vpc-id").map(String::as_str),
+            Some("c247304e-bda9")
+        );
     }
 }
