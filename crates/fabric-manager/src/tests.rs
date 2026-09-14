@@ -344,6 +344,91 @@ async fn fabric_errors_are_isolated_and_not_fatal(pool: sqlx::PgPool) -> eyre::R
 }
 
 #[carbide_macros::sqlx_test]
+async fn detaches_port_of_a_released_instance(pool: sqlx::PgPool) -> eyre::Result<()> {
+    // A released instance is a soft-deleted row (deleted IS NOT NULL) that
+    // lingers while the host is cleaned up. The tenant no longer owns the host,
+    // so the reconcile must treat the port as unplaced: no attach, one detach.
+    let mut txn = pool.begin().await?;
+    let vpc = seed_tor_vpc(&mut txn, "tor-a", Some(10001)).await?;
+    let seg = seed_hostinband_segment(&mut txn, vpc, 100, "10.10.0.0/24", "10.10.0.1").await?;
+    let machine_id = seed_host_with_connection(&mut txn, "leaf01/Ethernet1").await?;
+    let instance_id: InstanceId = uuid::Uuid::new_v4().into();
+    let cfg = model::instance::config::InstanceConfig {
+        tenant: model::instance::config::tenant_config::TenantConfig {
+            tenant_organization_id: "tenant".parse().unwrap(),
+            tenant_keyset_ids: vec![],
+            hostname: None,
+        },
+        os: model::os::OperatingSystem {
+            user_data: None,
+            variant: model::os::OperatingSystemVariant::OsImage(uuid::Uuid::new_v4()),
+            phone_home_enabled: false,
+            run_provisioning_instructions_on_every_boot: false,
+        },
+        network: Default::default(),
+        infiniband: Default::default(),
+        network_security_group_id: None,
+        extension_services: Default::default(),
+        nvlink: Default::default(),
+        spxconfig: Default::default(),
+    };
+    db::instance::batch_persist(
+        vec![model::instance::NewInstance {
+            instance_id,
+            machine_id,
+            instance_type_id: None,
+            config: &cfg,
+            metadata: Default::default(),
+            config_version: ConfigVersion::initial(),
+            network_config_version: ConfigVersion::initial(),
+            ib_config_version: ConfigVersion::initial(),
+            extension_services_config_version: ConfigVersion::initial(),
+            nvlink_config_version: ConfigVersion::initial(),
+            spx_config_version: ConfigVersion::initial(),
+        }],
+        &mut *txn,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO instance_addresses (instance_id, address, segment_id, prefix, vpc_id) \
+         VALUES ($1, $2::inet, $3, $4::cidr, $5)",
+    )
+    .bind(instance_id)
+    .bind("10.10.0.10")
+    .bind(seg.id)
+    .bind("10.10.0.0/24")
+    .bind(vpc)
+    .execute(&mut *txn)
+    .await?;
+    sqlx::query("UPDATE instances SET deleted = now() WHERE id = $1")
+        .bind(instance_id)
+        .execute(&mut *txn)
+        .await?;
+    txn.commit().await?;
+
+    let mut fabric = MockFabricOperations::new();
+    fabric.expect_ensure_vrf().returning(|_| Ok(()));
+    fabric.expect_get_vrf_status().returning(|_| Ok(None));
+    fabric.expect_attach_host().times(0).returning(|_| Ok(()));
+    fabric
+        .expect_list_attachments()
+        .returning(|_| Ok(vec!["leaf01/Ethernet1".to_string()]));
+    fabric
+        .expect_detach_host()
+        .withf(|a: &HostAttachment| a.vpc_name == "tor-a" && a.connection == "leaf01/Ethernet1")
+        .times(1)
+        .returning(|_| Ok(()));
+
+    let mgr = FabricManager::new(Arc::new(fabric), pool, FabricManagerConfig::default());
+    for v in &mgr.list_tor_vrf_vpcs().await? {
+        mgr.reconcile_vpc(v)
+            .await
+            .map_err(|e| eyre::eyre!("reconcile {} failed: {e}", v.metadata.name))?;
+    }
+    Ok(())
+}
+
+#[carbide_macros::sqlx_test]
 async fn detaches_port_whose_instance_is_gone(pool: sqlx::PgPool) -> eyre::Result<()> {
     // A ToR-VRF VPC with a ready segment but no placed instance, while the fabric
     // still binds a port into its VRF (the instance was released): the reconcile

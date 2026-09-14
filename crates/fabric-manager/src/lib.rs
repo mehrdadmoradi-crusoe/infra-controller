@@ -239,16 +239,19 @@ impl FabricManager {
 
         // (b) Attach every placed host whose operator-declared Connection label is
         // set. NICo references the fabric-owned wiring by name; it never invents it.
-        let instance_ids = db::instance::find_ids(
-            &self.db,
-            model::instance::InstanceSearchFilter {
-                label: None,
-                tenant_org_id: None,
-                vpc_id: Some(vpc.id.to_string()),
-                instance_type_id: None,
-            },
+        // Placed hosts are the *live* instances addressed in this VPC. A released
+        // instance stays as a soft-deleted row while the host is cleaned up, but
+        // the tenant no longer owns the host, so its port must leave the tenant
+        // VRF on this pass (and, once the quarantine VRF exists, land there).
+        let instance_ids: Vec<carbide_uuid::instance::InstanceId> = sqlx::query_scalar(
+            "SELECT DISTINCT i.id FROM instances i \
+             JOIN instance_addresses a ON a.instance_id = i.id \
+             WHERE a.vpc_id = $1 AND i.deleted IS NULL",
         )
-        .await?;
+        .bind(vpc.id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| eyre::eyre!("fabric-manager: list live instances for vpc {}: {e}", vpc.id))?;
         let mut desired_connections: std::collections::HashSet<String> = std::collections::HashSet::new();
         for id in instance_ids {
             let Some(inst) = db::instance::find_by_id(&self.db, id).await? else {
