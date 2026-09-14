@@ -16,7 +16,11 @@ use carbide_fabric::{FabricConfig, FabricOperations, HedgehogFabric, HostAttachm
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = FabricConfig { enabled: true, namespace: "default".to_string(), ..Default::default() };
+    let cfg = FabricConfig {
+        enabled: true,
+        namespace: "default".to_string(),
+        ..Default::default()
+    };
     let fabric = HedgehogFabric::try_default(&cfg).await?;
 
     let intent = VrfIntent {
@@ -29,7 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dhcp_range: Some(("10.0.42.10".to_string(), "10.0.42.250".to_string())),
     };
 
-    println!("[1/3] ensure_vrf({}) -> Hedgehog VPC l3vni ...", intent.name);
+    println!(
+        "[1/3] ensure_vrf({}) -> Hedgehog VPC l3vni ...",
+        intent.name
+    );
     fabric.ensure_vrf(&intent).await?;
     println!("      ok");
 

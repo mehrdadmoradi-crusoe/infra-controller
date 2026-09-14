@@ -15,10 +15,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use model::network_segment::NetworkSegmentType;
-use model::vpc::Vpc;
 use carbide_fabric::{FabricOperations, HostAttachment, VrfIntent};
 use carbide_network::virtualization::VpcVirtualizationType;
+use model::network_segment::NetworkSegmentType;
+use model::vpc::Vpc;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -49,7 +49,9 @@ impl FabricManagerConfig {
 
 impl Default for FabricManagerConfig {
     fn default() -> Self {
-        Self { run_interval: Self::default_run_interval() }
+        Self {
+            run_interval: Self::default_run_interval(),
+        }
     }
 }
 
@@ -77,7 +79,9 @@ pub struct FabricManager {
 
 impl std::fmt::Debug for FabricManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FabricManager").field("config", &self.config).finish()
+        f.debug_struct("FabricManager")
+            .field("config", &self.config)
+            .finish()
     }
 }
 
@@ -114,12 +118,17 @@ impl FabricManager {
     /// One reconcile pass: ensure a fabric VRF for every ToR-VRF VPC.
     pub async fn run_single_iteration(&self) -> eyre::Result<usize> {
         let vpcs = self.list_tor_vrf_vpcs().await?;
-        tracing::debug!(count = vpcs.len(), "fabric-manager: reconciling ToR-VRF VPCs");
+        tracing::debug!(
+            count = vpcs.len(),
+            "fabric-manager: reconciling ToR-VRF VPCs"
+        );
         let mut ok = 0usize;
         for vpc in &vpcs {
             match self.reconcile_vpc(vpc).await {
                 Ok(()) => ok += 1,
-                Err(e) => tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: VPC reconcile failed"),
+                Err(e) => {
+                    tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: VPC reconcile failed")
+                }
             }
         }
         self.gc_orphaned_vrfs(&vpcs).await;
@@ -234,7 +243,9 @@ impl FabricManager {
                         "fabric-manager: acquire for fabric status write failed"),
                 }
             }
-            Err(e) => tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: get_vrf_status failed"),
+            Err(e) => {
+                tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: get_vrf_status failed")
+            }
         }
 
         // (b) Attach every placed host whose operator-declared Connection label is
@@ -251,8 +262,14 @@ impl FabricManager {
         .bind(vpc.id)
         .fetch_all(&self.db)
         .await
-        .map_err(|e| eyre::eyre!("fabric-manager: list live instances for vpc {}: {e}", vpc.id))?;
-        let mut desired_connections: std::collections::HashSet<String> = std::collections::HashSet::new();
+        .map_err(|e| {
+            eyre::eyre!(
+                "fabric-manager: list live instances for vpc {}: {e}",
+                vpc.id
+            )
+        })?;
+        let mut desired_connections: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for id in instance_ids {
             let Some(inst) = db::instance::find_by_id(&self.db, id).await? else {
                 continue;
@@ -284,7 +301,10 @@ impl FabricManager {
         // is removed on the next pass. A listing failure only skips the detach.
         match self.fabric.list_attachments(&vpc.metadata.name).await {
             Ok(bound) => {
-                for connection in bound.into_iter().filter(|c| !desired_connections.contains(c)) {
+                for connection in bound
+                    .into_iter()
+                    .filter(|c| !desired_connections.contains(c))
+                {
                     tracing::info!(vpc = %vpc.id, %connection,
                         "fabric-manager: detaching port with no placed instance");
                     self.fabric
@@ -295,7 +315,9 @@ impl FabricManager {
                         .await?;
                 }
             }
-            Err(e) => tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: list_attachments failed; skipping detach"),
+            Err(e) => {
+                tracing::warn!(vpc = %vpc.id, error = %e, "fabric-manager: list_attachments failed; skipping detach")
+            }
         }
 
         // (c) Peer with other fabric-managed (TorVrf) VPCs. NICo programs peering

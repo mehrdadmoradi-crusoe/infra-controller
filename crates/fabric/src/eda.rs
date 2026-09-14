@@ -112,10 +112,9 @@ struct TokenResponse {
 impl EdaFabric {
     /// Build from the site config; needs `[fabric.eda]` plus the two env secrets.
     pub async fn try_default(cfg: &FabricConfig) -> Result<Self, FabricError> {
-        let eda = cfg
-            .eda
-            .clone()
-            .ok_or_else(|| FabricError::Invalid("[fabric.eda] is required for backend = \"eda\"".into()))?;
+        let eda = cfg.eda.clone().ok_or_else(|| {
+            FabricError::Invalid("[fabric.eda] is required for backend = \"eda\"".into())
+        })?;
         let password = std::env::var(PASSWORD_ENV)
             .map_err(|_| FabricError::Invalid(format!("{PASSWORD_ENV} is not set")))?;
         let client_secret = std::env::var(CLIENT_SECRET_ENV)
@@ -154,7 +153,13 @@ impl EdaFabric {
         }
         let cleaned: String = nico_name
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
             .collect();
         let mut name = format!("nico-{}", cleaned.trim_matches('-'));
         name.truncate(63);
@@ -163,12 +168,11 @@ impl EdaFabric {
 
     async fn token(&self, force: bool) -> Result<String, FabricError> {
         let mut guard = self.token.lock().await;
-        if !force {
-            if let Some((t, exp)) = guard.as_ref() {
-                if Instant::now() < *exp {
-                    return Ok(t.clone());
-                }
-            }
+        if !force
+            && let Some((t, exp)) = guard.as_ref()
+            && Instant::now() < *exp
+        {
+            return Ok(t.clone());
         }
         let url = format!(
             "{}/core/httpproxy/v1/keycloak/realms/{}/protocol/openid-connect/token",
@@ -191,12 +195,17 @@ impl EdaFabric {
         if !resp.status().is_success() {
             let s = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(FabricError::Eda(format!("token request failed: {s}: {body}")));
+            return Err(FabricError::Eda(format!(
+                "token request failed: {s}: {body}"
+            )));
         }
         let tr: TokenResponse = resp.json().await?;
         // Refresh a minute early; EDA tokens are short-lived.
         let ttl = tr.expires_in.unwrap_or(300).saturating_sub(60).max(30);
-        *guard = Some((tr.access_token.clone(), Instant::now() + Duration::from_secs(ttl)));
+        *guard = Some((
+            tr.access_token.clone(),
+            Instant::now() + Duration::from_secs(ttl),
+        ));
         Ok(tr.access_token)
     }
 
@@ -226,13 +235,21 @@ impl EdaFabric {
         Ok(resp)
     }
 
-    async fn get(&self, gv: &str, plural: &str, name: &str) -> Result<Option<serde_json::Value>, FabricError> {
+    async fn get(
+        &self,
+        gv: &str,
+        plural: &str,
+        name: &str,
+    ) -> Result<Option<serde_json::Value>, FabricError> {
         let url = self.url(gv, plural, Some(name));
         let resp = self.send(|| self.http.get(&url)).await?;
         match resp.status() {
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             s if s.is_success() => Ok(Some(resp.json().await?)),
-            s => Err(FabricError::Eda(format!("GET {url}: {s}: {}", resp.text().await.unwrap_or_default()))),
+            s => Err(FabricError::Eda(format!(
+                "GET {url}: {s}: {}",
+                resp.text().await.unwrap_or_default()
+            ))),
         }
     }
 
@@ -260,23 +277,40 @@ impl EdaFabric {
             // EDA fills in server-side defaults on read (e.g. `ipMTU` on an
             // IRBInterface), so compare only the fields NICo actually sets:
             // a strict equality would PUT on every pass and never converge.
-            let same_spec = match (cur.get("spec").and_then(|s| s.as_object()), spec.as_object()) {
-                (Some(cur_spec), Some(want)) => want.iter().all(|(k, v)| cur_spec.get(k) == Some(v)),
+            let same_spec = match (
+                cur.get("spec").and_then(|s| s.as_object()),
+                spec.as_object(),
+            ) {
+                (Some(cur_spec), Some(want)) => {
+                    want.iter().all(|(k, v)| cur_spec.get(k) == Some(v))
+                }
                 _ => cur.get("spec") == Some(&spec),
             };
             let same_labels = cur
                 .pointer("/metadata/labels")
-                .map(|l| labels.iter().all(|(k, v)| l.get(k).and_then(|x| x.as_str()) == Some(v)))
+                .map(|l| {
+                    labels
+                        .iter()
+                        .all(|(k, v)| l.get(k).and_then(|x| x.as_str()) == Some(v))
+                })
                 .unwrap_or(labels.is_empty());
             if same_spec && same_labels {
                 return Ok(());
             }
         }
         let exists = current.is_some();
-        let url = if exists { self.url(gv, plural, Some(name)) } else { self.url(gv, plural, None) };
+        let url = if exists {
+            self.url(gv, plural, Some(name))
+        } else {
+            self.url(gv, plural, None)
+        };
         let resp = self
             .send(|| {
-                let rb = if exists { self.http.put(&url) } else { self.http.post(&url) };
+                let rb = if exists {
+                    self.http.put(&url)
+                } else {
+                    self.http.post(&url)
+                };
                 rb.json(&body)
             })
             .await?;
@@ -297,21 +331,39 @@ impl EdaFabric {
         match resp.status() {
             reqwest::StatusCode::NOT_FOUND => Ok(()),
             s if s.is_success() => Ok(()),
-            s => Err(FabricError::Eda(format!("DELETE {url}: {s}: {}", resp.text().await.unwrap_or_default()))),
+            s => Err(FabricError::Eda(format!(
+                "DELETE {url}: {s}: {}",
+                resp.text().await.unwrap_or_default()
+            ))),
         }
     }
 
-    async fn list(&self, gv: &str, plural: &str, label_selector: &str) -> Result<Vec<serde_json::Value>, FabricError> {
+    async fn list(
+        &self,
+        gv: &str,
+        plural: &str,
+        label_selector: &str,
+    ) -> Result<Vec<serde_json::Value>, FabricError> {
         let url = self.url(gv, plural, None);
         let resp = self
-            .send(|| self.http.get(&url).query(&[("labelSelector", label_selector)]))
+            .send(|| {
+                self.http
+                    .get(&url)
+                    .query(&[("labelSelector", label_selector)])
+            })
             .await?;
         if !resp.status().is_success() {
             let s = resp.status();
-            return Err(FabricError::Eda(format!("LIST {url}: {s}: {}", resp.text().await.unwrap_or_default())));
+            return Err(FabricError::Eda(format!(
+                "LIST {url}: {s}: {}",
+                resp.text().await.unwrap_or_default()
+            )));
         }
         let v: serde_json::Value = resp.json().await?;
-        Ok(v.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default())
+        Ok(v.get("items")
+            .and_then(|i| i.as_array())
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// Set or clear the per-VPC label on a fabric-owned `Interface`. JSON Patch on
@@ -334,7 +386,10 @@ impl EdaFabric {
             .await?;
         if !resp.status().is_success() {
             let s = resp.status();
-            return Err(FabricError::Eda(format!("PATCH interface {interface}: {s}: {}", resp.text().await.unwrap_or_default())));
+            return Err(FabricError::Eda(format!(
+                "PATCH interface {interface}: {s}: {}",
+                resp.text().await.unwrap_or_default()
+            )));
         }
         Ok(())
     }
@@ -360,7 +415,9 @@ impl EdaFabric {
         let len = subnet_cidr
             .rsplit_once('/')
             .map(|(_, l)| l)
-            .ok_or_else(|| FabricError::Invalid(format!("subnet {subnet_cidr} has no prefix length")))?;
+            .ok_or_else(|| {
+                FabricError::Invalid(format!("subnet {subnet_cidr} has no prefix length"))
+            })?;
         Ok(format!("{gateway}/{len}"))
     }
 }
@@ -392,35 +449,59 @@ impl FabricOperations for EdaFabric {
             "eviPool": EVI_POOL,
         })).await?;
 
-        self.upsert(SERVICES_GV, "BridgeDomain", "bridgedomains", &bd_name, &labels, serde_json::json!({
-            "type": "EVPNVXLAN",
-            "description": format!("NICo subnet {} of {}", intent.subnet_cidr, intent.name),
-            "encapOptions": encap,
-            "eviPool": EVI_POOL,
-            "macLearning": { "enabled": true, "agingTimeSeconds": 300 },
-        })).await?;
+        self.upsert(
+            SERVICES_GV,
+            "BridgeDomain",
+            "bridgedomains",
+            &bd_name,
+            &labels,
+            serde_json::json!({
+                "type": "EVPNVXLAN",
+                "description": format!("NICo subnet {} of {}", intent.subnet_cidr, intent.name),
+                "encapOptions": encap,
+                "eviPool": EVI_POOL,
+                "macLearning": { "enabled": true, "agingTimeSeconds": 300 },
+            }),
+        )
+        .await?;
 
-        self.upsert(SERVICES_GV, "IRBInterface", "irbinterfaces", &name, &labels, serde_json::json!({
-            "bridgeDomain": bd_name,
-            "router": name,
-            "description": format!("NICo gateway {} for {}", intent.gateway, intent.name),
-            "ipAddresses": [ {
-                "ipv4Address": {
-                    "ipPrefix": Self::gateway_prefix(&intent.gateway, &intent.subnet_cidr)?,
-                    "primary": true,
-                    "anycast": true,
-                }
-            } ],
-        })).await?;
+        self.upsert(
+            SERVICES_GV,
+            "IRBInterface",
+            "irbinterfaces",
+            &name,
+            &labels,
+            serde_json::json!({
+                "bridgeDomain": bd_name,
+                "router": name,
+                "description": format!("NICo gateway {} for {}", intent.gateway, intent.name),
+                "ipAddresses": [ {
+                    "ipv4Address": {
+                        "ipPrefix": Self::gateway_prefix(&intent.gateway, &intent.subnet_cidr)?,
+                        "primary": true,
+                        "anycast": true,
+                    }
+                } ],
+            }),
+        )
+        .await?;
 
         // Host-facing VLAN: binds every Interface labelled for this VPC. Hosts are
         // added by attach_host, which sets that label.
-        self.upsert(SERVICES_GV, "VLAN", "vlans", &name, &labels, serde_json::json!({
-            "bridgeDomain": bd_name,
-            "vlanID": intent.vlan.to_string(),
-            "interfaceSelectors": [ format!("{VPC_LABEL}={name}") ],
-            "description": format!("NICo VLAN {} for {}", intent.vlan, intent.name),
-        })).await
+        self.upsert(
+            SERVICES_GV,
+            "VLAN",
+            "vlans",
+            &name,
+            &labels,
+            serde_json::json!({
+                "bridgeDomain": bd_name,
+                "vlanID": intent.vlan.to_string(),
+                "interfaceSelectors": [ format!("{VPC_LABEL}={name}") ],
+                "description": format!("NICo VLAN {} for {}", intent.vlan, intent.name),
+            }),
+        )
+        .await
     }
 
     async fn attach_host(&self, att: &HostAttachment) -> Result<(), FabricError> {
@@ -429,13 +510,22 @@ impl FabricOperations for EdaFabric {
         // `connection` is the fabric-owned Interface the host is cabled to (e.g.
         // `<leaf>-ethernet-1-40`), recorded on the NICo machine from inventory.
         // Idempotent: skip the transaction if the label is already right.
-        if let Some(cur) = self.get(INTERFACES_GV, "interfaces", &att.connection).await? {
-            let have = cur.pointer("/metadata/labels").and_then(|l| l.get(VPC_LABEL)).and_then(|v| v.as_str());
+        if let Some(cur) = self
+            .get(INTERFACES_GV, "interfaces", &att.connection)
+            .await?
+        {
+            let have = cur
+                .pointer("/metadata/labels")
+                .and_then(|l| l.get(VPC_LABEL))
+                .and_then(|v| v.as_str());
             if have == Some(vrf.as_str()) {
                 return Ok(());
             }
         } else {
-            return Err(FabricError::Invalid(format!("interface {} does not exist on the fabric", att.connection)));
+            return Err(FabricError::Invalid(format!(
+                "interface {} does not exist on the fabric",
+                att.connection
+            )));
         }
         self.label_interface(&att.connection, Some(&vrf)).await
     }
@@ -446,7 +536,11 @@ impl FabricOperations for EdaFabric {
             .list(INTERFACES_GV, "interfaces", &format!("{VPC_LABEL}={vrf}"))
             .await?
             .into_iter()
-            .filter_map(|i| i.pointer("/metadata/name").and_then(|v| v.as_str()).map(str::to_string))
+            .filter_map(|i| {
+                i.pointer("/metadata/name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
             .collect())
     }
 
@@ -454,10 +548,16 @@ impl FabricOperations for EdaFabric {
         let vrf = Self::eda_name(&att.vpc_name);
         // Only clear the label if it still points at this VRF: a port that has
         // since been attached to another VPC must not lose that binding.
-        let Some(cur) = self.get(INTERFACES_GV, "interfaces", &att.connection).await? else {
+        let Some(cur) = self
+            .get(INTERFACES_GV, "interfaces", &att.connection)
+            .await?
+        else {
             return Ok(());
         };
-        let have = cur.pointer("/metadata/labels").and_then(|l| l.get(VPC_LABEL)).and_then(|v| v.as_str());
+        let have = cur
+            .pointer("/metadata/labels")
+            .and_then(|l| l.get(VPC_LABEL))
+            .and_then(|v| v.as_str());
         if have != Some(vrf.as_str()) {
             return Ok(());
         }
@@ -472,7 +572,10 @@ impl FabricOperations for EdaFabric {
         )))
     }
 
-    async fn get_vrf_status(&self, vpc_name: &str) -> Result<Option<serde_json::Value>, FabricError> {
+    async fn get_vrf_status(
+        &self,
+        vpc_name: &str,
+    ) -> Result<Option<serde_json::Value>, FabricError> {
         let name = Self::eda_name(vpc_name);
         Ok(self
             .get(SERVICES_GV, "routers", &name)
@@ -483,9 +586,15 @@ impl FabricOperations for EdaFabric {
     async fn list_vrfs(&self) -> Result<Vec<(String, String)>, FabricError> {
         let mut out = Vec::new();
         for o in self.list(SERVICES_GV, "routers", NICO_ID_LABEL).await? {
-            let name = o.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or_default();
+            let name = o
+                .pointer("/metadata/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             let nico_id = o
-                .pointer(&format!("/metadata/labels/{}", NICO_ID_LABEL.replace('/', "~1")))
+                .pointer(&format!(
+                    "/metadata/labels/{}",
+                    NICO_ID_LABEL.replace('/', "~1")
+                ))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             if !name.is_empty() && !nico_id.is_empty() {
@@ -499,7 +608,10 @@ impl FabricOperations for EdaFabric {
         let name = Self::eda_name(vpc_name);
         tracing::info!(vrf = %name, "fabric(eda): delete_vrf");
         // Detach hosts first so the VLAN has no members when it goes.
-        for i in self.list(INTERFACES_GV, "interfaces", &format!("{VPC_LABEL}={name}")).await? {
+        for i in self
+            .list(INTERFACES_GV, "interfaces", &format!("{VPC_LABEL}={name}"))
+            .await?
+        {
             if let Some(n) = i.pointer("/metadata/name").and_then(|v| v.as_str()) {
                 self.label_interface(n, None).await?;
             }
@@ -525,20 +637,27 @@ mod tests {
     #[test]
     fn eda_name_is_prefixed_and_label_safe() {
         assert_eq!(EdaFabric::eda_name("frontend"), "nico-frontend");
-        assert_eq!(EdaFabric::eda_name("OpenAI Training"), "nico-openai-training");
+        assert_eq!(
+            EdaFabric::eda_name("OpenAI Training"),
+            "nico-openai-training"
+        );
         assert_eq!(EdaFabric::eda_name("nico-frontend"), "nico-frontend");
         assert!(EdaFabric::eda_name(&"x".repeat(100)).len() <= 63);
     }
 
     #[test]
     fn gateway_takes_subnet_prefix_length() {
-        assert_eq!(EdaFabric::gateway_prefix("10.0.20.1", "10.0.20.0/24").unwrap(), "10.0.20.1/24");
+        assert_eq!(
+            EdaFabric::gateway_prefix("10.0.20.1", "10.0.20.0/24").unwrap(),
+            "10.0.20.1/24"
+        );
         assert!(EdaFabric::gateway_prefix("10.0.20.1", "10.0.20.0").is_err());
     }
 
     #[test]
     fn eda_config_defaults() {
-        let c: EdaConfig = serde_json::from_str(r#"{"api_url":"https://x","username":"nico"}"#).unwrap();
+        let c: EdaConfig =
+            serde_json::from_str(r#"{"api_url":"https://x","username":"nico"}"#).unwrap();
         assert_eq!(c.realm, "eda");
         assert_eq!(c.client_id, "eda");
         assert!(!c.insecure_skip_tls_verify);

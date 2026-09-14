@@ -41,12 +41,18 @@ async fn seed_vpc_with_host(
             id: vpc,
             tenant_organization_id: "tenant".to_string(),
             network_virtualization_type: VpcVirtualizationType::TorVrf,
-            metadata: Metadata { name: name.to_string(), ..Default::default() },
+            metadata: Metadata {
+                name: name.to_string(),
+                ..Default::default()
+            },
             network_security_group_id: None,
             routing_profile_type: None,
             vni: Some(vni),
         },
-        model::vpc::VpcStatus { vni: None, fabric: None },
+        model::vpc::VpcStatus {
+            vni: None,
+            fabric: None,
+        },
         txn,
     )
     .await?;
@@ -80,8 +86,16 @@ async fn seed_vpc_with_host(
     let machine =
         db::machine::create(txn, None, &machine_id, ManagedHostState::Created, None, 2).await?;
     let labels = HashMap::from([(CONNECTION_LABEL.to_string(), connection.to_string())]);
-    db::machine::update_metadata(txn, &machine_id, machine.version, Metadata { labels, ..Default::default() })
-        .await?;
+    db::machine::update_metadata(
+        txn,
+        &machine_id,
+        machine.version,
+        Metadata {
+            labels,
+            ..Default::default()
+        },
+    )
+    .await?;
 
     let instance_id: InstanceId = uuid::Uuid::new_v4().into();
     let os = model::os::OperatingSystem {
@@ -143,8 +157,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[1/3] migrate + seed two TorVrf VPCs (peer={peer}) ...");
     db::migrations::migrate(&pool).await?;
     let mut txn = pool.begin().await?;
-    let a = seed_vpc_with_host(&mut txn, "torvlab", 104343, "10.0.43.0/24", 1043, "10.0.43.1", "10.0.43.10", "server-03--unbundled--leaf-01").await?;
-    let b = seed_vpc_with_host(&mut txn, "torvlab2", 104444, "10.0.44.0/24", 1044, "10.0.44.1", "10.0.44.10", "server-04--bundled--leaf-02").await?;
+    let a = seed_vpc_with_host(
+        &mut txn,
+        "torvlab",
+        104343,
+        "10.0.43.0/24",
+        1043,
+        "10.0.43.1",
+        "10.0.43.10",
+        "server-03--unbundled--leaf-01",
+    )
+    .await?;
+    let b = seed_vpc_with_host(
+        &mut txn,
+        "torvlab2",
+        104444,
+        "10.0.44.0/24",
+        1044,
+        "10.0.44.1",
+        "10.0.44.10",
+        "server-04--bundled--leaf-02",
+    )
+    .await?;
     if peer {
         db::vpc_peering::create(&mut txn, a, b, uuid::Uuid::new_v4().into()).await?;
         println!("      seeded vpc_peering torvlab <-> torvlab2");
@@ -152,10 +186,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     txn.commit().await?;
 
     println!("[2/3] FabricManager reconcile (real HedgehogFabric) ...");
-    let fcfg = FabricConfig { enabled: true, namespace: "default".to_string(), ..Default::default() };
+    let fcfg = FabricConfig {
+        enabled: true,
+        namespace: "default".to_string(),
+        ..Default::default()
+    };
     let fabric: Arc<dyn FabricOperations> = Arc::new(HedgehogFabric::try_default(&fcfg).await?);
     let mgr = FabricManager::new(fabric, pool, FabricManagerConfig::default());
     let n = mgr.run_single_iteration().await?;
-    println!("[3/3] reconciled {n} ToR-VRF VPC(s){}.", if peer { " + peering" } else { "" });
+    println!(
+        "[3/3] reconciled {n} ToR-VRF VPC(s){}.",
+        if peer { " + peering" } else { "" }
+    );
     Ok(())
 }

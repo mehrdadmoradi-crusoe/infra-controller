@@ -20,7 +20,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::PgPool::connect(&db_url).await?;
     db::migrations::migrate(&pool).await?;
 
-    let fcfg = FabricConfig { enabled: true, namespace: "default".to_string(), ..Default::default() };
+    let fcfg = FabricConfig {
+        enabled: true,
+        namespace: "default".to_string(),
+        ..Default::default()
+    };
     let fabric: Arc<dyn FabricOperations> = Arc::new(HedgehogFabric::try_default(&fcfg).await?);
     let mgr = FabricManager::new(fabric.clone(), pool, FabricManagerConfig::default());
 

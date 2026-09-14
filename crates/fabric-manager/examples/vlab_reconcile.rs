@@ -44,12 +44,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             id: vpc,
             tenant_organization_id: "tenant".to_string(),
             network_virtualization_type: VpcVirtualizationType::TorVrf,
-            metadata: Metadata { name: "torvlab".to_string(), ..Default::default() },
+            metadata: Metadata {
+                name: "torvlab".to_string(),
+                ..Default::default()
+            },
             network_security_group_id: None,
             routing_profile_type: None,
             vni: Some(104343),
         },
-        model::vpc::VpcStatus { vni: None, fabric: None },
+        model::vpc::VpcStatus {
+            vni: None,
+            fabric: None,
+        },
         &mut txn,
     )
     .await?;
@@ -80,14 +86,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hw = [0u8; 32];
     hw[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
     let machine_id = MachineId::new(MachineIdSource::Tpm, hw, MachineType::Host);
-    let machine =
-        db::machine::create(&mut txn, None, &machine_id, ManagedHostState::Created, None, 2).await?;
+    let machine = db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Created,
+        None,
+        2,
+    )
+    .await?;
     let labels = HashMap::from([(CONNECTION_LABEL.to_string(), LEAF_CONNECTION.to_string())]);
     db::machine::update_metadata(
         &mut txn,
         &machine_id,
         machine.version,
-        Metadata { labels, ..Default::default() },
+        Metadata {
+            labels,
+            ..Default::default()
+        },
     )
     .await?;
 
@@ -143,7 +159,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     txn.commit().await?;
 
     println!("[3/4] running FabricManager reconcile (real HedgehogFabric) ...");
-    let fcfg = FabricConfig { enabled: true, namespace: "default".to_string(), ..Default::default() };
+    let fcfg = FabricConfig {
+        enabled: true,
+        namespace: "default".to_string(),
+        ..Default::default()
+    };
     let fabric: Arc<dyn FabricOperations> = Arc::new(HedgehogFabric::try_default(&fcfg).await?);
     let mgr = FabricManager::new(fabric, pool, FabricManagerConfig::default());
     let n = mgr.run_single_iteration().await?;

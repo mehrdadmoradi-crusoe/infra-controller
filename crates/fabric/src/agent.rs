@@ -25,8 +25,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use carbide_fabric_agent_api::v1 as pb;
-use carbide_fabric_agent_api::FabricAgentClient;
+use carbide_fabric_agent_api::{FabricAgentClient, v1 as pb};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tonic::{Code, Request, Status};
 
@@ -43,7 +42,9 @@ pub struct GrpcFabricAgent {
 
 impl std::fmt::Debug for GrpcFabricAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GrpcFabricAgent").field("endpoint", &self.endpoint).finish()
+        f.debug_struct("GrpcFabricAgent")
+            .field("endpoint", &self.endpoint)
+            .finish()
     }
 }
 
@@ -84,7 +85,9 @@ impl GrpcFabricAgent {
             if cfg.insecure_skip_tls_verify {
                 tracing::warn!("fabric agent: TLS verification disabled (development only)");
             }
-            endpoint = endpoint.tls_config(tls).map_err(|e| FabricError::Agent(e.to_string()))?;
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| FabricError::Agent(e.to_string()))?;
         }
         Ok(Self {
             client: FabricAgentClient::new(endpoint.connect_lazy()),
@@ -118,10 +121,14 @@ fn to_pb_membership(m: &PortMembership, request_id: String) -> pb::SetPortMember
         previous_vrf: m.previous_vrf.clone().unwrap_or_default(),
         witnesses: Some(pb::Witnesses {
             expected_macs: m.witnesses.expected_macs.clone(),
-            expected_lldp: m.witnesses.expected_lldp.as_ref().map(|(c, p)| pb::LldpNeighbor {
-                chassis_id: c.clone(),
-                port_id: p.clone(),
-            }),
+            expected_lldp: m
+                .witnesses
+                .expected_lldp
+                .as_ref()
+                .map(|(c, p)| pb::LldpNeighbor {
+                    chassis_id: c.clone(),
+                    port_id: p.clone(),
+                }),
         }),
         contract: Some(pb::PortContract {
             allowed_macs: m.contract.allowed_macs.clone(),
@@ -214,7 +221,10 @@ impl FabricOperations for GrpcFabricAgent {
             .map_err(|s| Self::map_status(None, s))
     }
 
-    async fn get_vrf_status(&self, vpc_name: &str) -> Result<Option<serde_json::Value>, FabricError> {
+    async fn get_vrf_status(
+        &self,
+        vpc_name: &str,
+    ) -> Result<Option<serde_json::Value>, FabricError> {
         let st = self
             .client
             .clone()
@@ -248,7 +258,11 @@ impl FabricOperations for GrpcFabricAgent {
             .await
             .map_err(|s| Self::map_status(None, s))?
             .into_inner();
-        Ok(resp.vrfs.into_iter().map(|v| (v.name, v.nico_vpc_id)).collect())
+        Ok(resp
+            .vrfs
+            .into_iter()
+            .map(|v| (v.name, v.nico_vpc_id))
+            .collect())
     }
 
     async fn delete_vrf(&self, vpc_name: &str) -> Result<(), FabricError> {
