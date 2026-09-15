@@ -27,6 +27,7 @@ use carbide_fabric::{
 };
 use carbide_fabric_agent_api::{CONTRACT_VERSION, FabricAgent, FabricAgentServer, v1 as pb};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Code, Request, Response, Status};
 
 /// The gRPC surface over one in-process adapter.
@@ -46,6 +47,104 @@ impl Service {
     pub fn into_server(self) -> FabricAgentServer<Self> {
         FabricAgentServer::new(self)
     }
+}
+
+/// Files and policy for serving the contract over TLS or mTLS.
+#[derive(Debug, Clone, Default)]
+pub struct TlsFiles {
+    /// PEM server certificate and key.
+    pub cert: std::path::PathBuf,
+    pub key: std::path::PathBuf,
+    /// PEM CA bundle clients must chain to (mTLS). `None` = server-only TLS.
+    pub client_ca: Option<std::path::PathBuf>,
+    /// SPIFFE ids (URI SANs) an mTLS client certificate must carry; empty
+    /// means any certificate the client CA signed.
+    pub allowed_client_uris: Vec<String>,
+}
+
+/// URI SANs of the leaf certificate the client presented, lower-cased.
+fn client_uris(req: &Request<()>) -> Vec<String> {
+    let Some(certs) = req.peer_certs() else {
+        return Vec::new();
+    };
+    let Some(leaf) = certs.first() else {
+        return Vec::new();
+    };
+    let Ok((_, cert)) = x509_parser::parse_x509_certificate(leaf.as_ref()) else {
+        return Vec::new();
+    };
+    let Ok(Some(san)) = cert.subject_alternative_name() else {
+        return Vec::new();
+    };
+    san.value
+        .general_names
+        .iter()
+        .filter_map(|n| match n {
+            x509_parser::extensions::GeneralName::URI(u) => Some(u.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Refuse calls from certificates whose SPIFFE id is not on the list. This is
+/// the identity check on top of the chain check mTLS already did.
+pub fn authorize(
+    allowed: Arc<Vec<String>>,
+) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
+    move |req: Request<()>| {
+        if allowed.is_empty() {
+            return Ok(req);
+        }
+        let uris = client_uris(&req);
+        if uris
+            .iter()
+            .any(|u| allowed.iter().any(|a| a.eq_ignore_ascii_case(u)))
+        {
+            Ok(req)
+        } else {
+            tracing::warn!(?uris, "fabric-agent: client identity not allowed");
+            Err(Status::permission_denied(format!(
+                "client identity {uris:?} is not allowed to drive this fabric agent"
+            )))
+        }
+    }
+}
+
+/// Serve the contract over TLS (mTLS when `client_ca` is set) on `addr`.
+/// Returns the bound address and the server task.
+pub async fn serve_tls(
+    inner: Arc<dyn FabricOperations>,
+    adapter: &str,
+    addr: SocketAddr,
+    tls: &TlsFiles,
+) -> eyre::Result<(
+    SocketAddr,
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+)> {
+    carbide_fabric::ensure_crypto_provider();
+    let mut cfg = ServerTlsConfig::new().identity(Identity::from_pem(
+        std::fs::read(&tls.cert)?,
+        std::fs::read(&tls.key)?,
+    ));
+    if let Some(ca) = &tls.client_ca {
+        cfg = cfg.client_ca_root(Certificate::from_pem(std::fs::read(ca)?));
+    }
+    if !tls.allowed_client_uris.is_empty() && tls.client_ca.is_none() {
+        eyre::bail!(
+            "allowed client ids need a client CA (the identity comes from the client certificate)"
+        );
+    }
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    let allowed = Arc::new(tls.allowed_client_uris.clone());
+    let svc = FabricAgentServer::with_interceptor(Service::new(inner, adapter), authorize(allowed));
+    let handle = tokio::spawn(
+        Server::builder()
+            .tls_config(cfg)?
+            .add_service(svc)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    Ok((bound, handle))
 }
 
 /// Serve on `addr` until the future is dropped. Returns the bound address, so

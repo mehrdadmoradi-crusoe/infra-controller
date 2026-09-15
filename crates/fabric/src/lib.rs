@@ -24,7 +24,7 @@ pub mod eda;
 #[cfg(test)]
 mod eda_http_tests;
 pub mod fake;
-pub use agent::GrpcFabricAgent;
+pub use agent::{GrpcFabricAgent, ensure_crypto_provider};
 pub use eda::EdaFabric;
 pub use fake::FakeFabric;
 use kube::Client;

@@ -22,6 +22,7 @@ test-support = ["dep:mockall"]
 [dependencies]
 carbide-fabric-agent-api = { path = "../fabric-agent-api" }
 tonic = { workspace = true }
+rustls = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 kube = { default-features = false, features = [
   "client",

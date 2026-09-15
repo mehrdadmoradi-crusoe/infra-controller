@@ -48,6 +48,15 @@ impl std::fmt::Debug for GrpcFabricAgent {
     }
 }
 
+/// Pick the process-wide rustls crypto provider once. The workspace links both
+/// `ring` (tonic) and `aws-lc-rs` (kube), and rustls refuses to guess between
+/// them: without this, the first TLS config built by the agent client or the
+/// agent server panics at startup (found by the kind mTLS run, not by the
+/// plaintext tests). Idempotent; a provider someone else installed wins.
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 impl GrpcFabricAgent {
     /// Build the channel lazily: the agent may be unreachable at NICo startup
     /// and the reconcile must not depend on it being up. Every call surfaces
@@ -60,6 +69,7 @@ impl GrpcFabricAgent {
         if cfg.endpoint.starts_with("https://") {
             // The workspace builds tonic with `tls-ring` only (no system or
             // webpki roots), so the trust anchor must be given explicitly.
+            ensure_crypto_provider();
             let mut tls = ClientTlsConfig::new();
             match &cfg.ca_file {
                 Some(ca) => {
