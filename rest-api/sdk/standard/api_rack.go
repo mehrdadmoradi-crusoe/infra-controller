@@ -806,7 +806,7 @@ GetRack Retrieve a Rack
 
 Get a Rack by ID.
 
-Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Rack on a Site of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Rack holding a Machine the org's Tenant has an Instance on. A Rack outside the caller's reach is reported as not found.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -1446,7 +1446,7 @@ Validate a Rack's components by comparing expected vs actual state.
 
 Compares the rack's expected component configuration against the actual state. Returns a detailed diff report showing missing, extra, and mismatched components.
 
-Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Rack on a Site of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Rack holding a Machine the org's Tenant has an Instance on. A Rack outside the caller's reach is reported as not found.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

@@ -22,6 +22,8 @@ var _ MappedNullable = &PlacementInRack{}
 
 // PlacementInRack Physical placement of a Machine within its Rack
 type PlacementInRack struct {
+	// ID of the Rack the Machine is placed in, as the Rack API reports it
+	RackId *string `json:"rackId,omitempty"`
 	// Rack slot the Machine occupies
 	SlotNumber NullableInt32 `json:"slotNumber,omitempty"`
 	// Index of the Machine's tray within its slot
@@ -43,6 +45,38 @@ func NewPlacementInRack() *PlacementInRack {
 func NewPlacementInRackWithDefaults() *PlacementInRack {
 	this := PlacementInRack{}
 	return &this
+}
+
+// GetRackId returns the RackId field value if set, zero value otherwise.
+func (o *PlacementInRack) GetRackId() string {
+	if o == nil || IsNil(o.RackId) {
+		var ret string
+		return ret
+	}
+	return *o.RackId
+}
+
+// GetRackIdOk returns a tuple with the RackId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *PlacementInRack) GetRackIdOk() (*string, bool) {
+	if o == nil || IsNil(o.RackId) {
+		return nil, false
+	}
+	return o.RackId, true
+}
+
+// HasRackId returns a boolean if a field has been set.
+func (o *PlacementInRack) HasRackId() bool {
+	if o != nil && !IsNil(o.RackId) {
+		return true
+	}
+
+	return false
+}
+
+// SetRackId gets a reference to the given string and assigns it to the RackId field.
+func (o *PlacementInRack) SetRackId(v string) {
+	o.RackId = &v
 }
 
 // GetSlotNumber returns the SlotNumber field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -141,6 +175,9 @@ func (o PlacementInRack) MarshalJSON() ([]byte, error) {
 
 func (o PlacementInRack) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.RackId) {
+		toSerialize["rackId"] = o.RackId
+	}
 	if o.SlotNumber.IsSet() {
 		toSerialize["slotNumber"] = o.SlotNumber.Get()
 	}

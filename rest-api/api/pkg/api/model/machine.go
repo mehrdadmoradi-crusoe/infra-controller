@@ -364,6 +364,8 @@ type APIMachine struct {
 
 // APIPlacementInRack captures the physical placement of a Machine within its Rack
 type APIPlacementInRack struct {
+	// RackID is the ID of the Rack the Machine is placed in, as the Rack API reports it
+	RackID string `json:"rackId,omitempty"`
 	// SlotNumber is the rack slot the Machine occupies
 	SlotNumber *int32 `json:"slotNumber"`
 	// TrayIndex is the index of the Machine's tray within its slot
@@ -744,10 +746,13 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 				apim.AssociatedDpuMachineIds = append(apim.AssociatedDpuMachineIds, id)
 			}
 		}
-		if placement := dbm.Metadata.GetPlacementInRack(); placement != nil {
-			apim.PlacementInRack = &APIPlacementInRack{
-				SlotNumber: placement.SlotNumber,
-				TrayIndex:  placement.TrayIndex,
+		rackID := dbm.Metadata.GetRackId().GetId()
+		placement := dbm.Metadata.GetPlacementInRack()
+		if rackID != "" || placement != nil {
+			apim.PlacementInRack = &APIPlacementInRack{RackID: rackID}
+			if placement != nil {
+				apim.PlacementInRack.SlotNumber = placement.SlotNumber
+				apim.PlacementInRack.TrayIndex = placement.TrayIndex
 			}
 		}
 	}

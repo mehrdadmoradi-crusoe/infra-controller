@@ -101,50 +101,21 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to access Rack data
-	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
-	if !ok {
-		logger.Warn().Msg("user does not have Provider Admin role, access denied")
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
-	}
-
-	// Get Infrastructure Provider for org
-	infrastructureProvider, err := common.GetInfrastructureProviderForOrg(ctx, nil, grh.dbSession, org)
-	if err != nil {
-		logger.Warn().Err(err).Msg("error getting infrastructure provider for org")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
-	}
-
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
 	grh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
 
-	// Validate the site
-	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, grh.dbSession)
-	if err != nil {
-		if errors.Is(err, common.ErrInvalidID) {
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Site specified in request: invalid ID", nil)
-		}
-		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request does not exist", nil)
-		}
-		logger.Error().Err(err).Msg("error retrieving Site from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request due to DB error", nil)
+	// Resolve the Site and who may read its Racks: the Provider reaches every
+	// Rack on its own Site, a Tenant only the Racks holding Machines its
+	// Instances occupy.
+	site, reach, apiErr := rackSiteAccess(ctx, logger, grh.dbSession, org, dbUser, apiRequest.SiteID)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
-	// Verify site belongs to the org's Infrastructure Provider
-	if site.InfrastructureProviderID != infrastructureProvider.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
-	}
-
-	siteConfig := &cdbm.SiteConfig{}
-	if site.Config != nil {
-		siteConfig = site.Config
-	}
-
-	if !siteConfig.Flow {
-		logger.Warn().Msg("site does not have NICo Flow enabled")
-		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site does not have NICo Flow enabled", nil)
+	if !reach.allows(rackStrID) {
+		logger.Warn().Msg("Tenant holds no Instance on a Machine in the requested Rack")
+		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, rackNotFoundMessage, nil)
 	}
 
 	// Get the temporal client for the site
@@ -476,20 +447,6 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to access Rack data
-	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
-	if !ok {
-		logger.Warn().Msg("user does not have Provider Admin role, access denied")
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
-	}
-
-	// Get Infrastructure Provider for org
-	infrastructureProvider, err := common.GetInfrastructureProviderForOrg(ctx, nil, vrh.dbSession, org)
-	if err != nil {
-		logger.Warn().Err(err).Msg("error getting infrastructure provider for org")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
-	}
-
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
 	vrh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
@@ -500,32 +457,17 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "siteId query parameter is required", nil)
 	}
 
-	// Validate the site
-	site, err := common.GetSiteFromIDString(ctx, nil, siteStrID, vrh.dbSession)
-	if err != nil {
-		if errors.Is(err, common.ErrInvalidID) {
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Site specified in request: invalid ID", nil)
-		}
-		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request does not exist", nil)
-		}
-		logger.Error().Err(err).Msg("error retrieving Site from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request due to DB error", nil)
+	// Resolve the Site and who may read its Racks: the Provider reaches every
+	// Rack on its own Site, a Tenant only the Racks holding Machines its
+	// Instances occupy.
+	site, reach, apiErr := rackSiteAccess(ctx, logger, vrh.dbSession, org, dbUser, siteStrID)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
-	// Verify site belongs to the org's Infrastructure Provider
-	if site.InfrastructureProviderID != infrastructureProvider.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
-	}
-
-	siteConfig := &cdbm.SiteConfig{}
-	if site.Config != nil {
-		siteConfig = site.Config
-	}
-
-	if !siteConfig.Flow {
-		logger.Warn().Msg("site does not have NICo Flow enabled")
-		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site does not have NICo Flow enabled", nil)
+	if !reach.allows(rackStrID) {
+		logger.Warn().Msg("Tenant holds no Instance on a Machine in the requested Rack")
+		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, rackNotFoundMessage, nil)
 	}
 
 	// Get the temporal client for the site
