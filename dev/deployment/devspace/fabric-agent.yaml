@@ -21,11 +21,19 @@ data:
     enabled = true
     backend = "eda"
     namespace = "nico-poc"
+    # Provider-owned ToR-VRF VPC whose VRF holds every cabled port that is not
+    # placed in a tenant VPC (create it like any VPC: CreateVpc type TOR plus a
+    # HostInband segment). Ports land here on release and before discovery.
+    quarantine_vpc = "nico-provisioning"
 
     [fabric.eda]
     api_url = "https://192.168.5.2:1443"
     username = "admin"
     insecure_skip_tls_verify = true
+    # The kind demo hosts are the BMC mock and are not cabled to the simulated
+    # leaves, so the leaf never learns their MACs: evaluate witnesses and log
+    # instead of refusing. On a real fabric use "enforce" (the default).
+    witness = "log"
 ---
 apiVersion: v1
 kind: Service
