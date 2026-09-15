@@ -96,7 +96,7 @@ func (scr *APISubnetCreateRequest) ToProto(subnet *cdbm.Subnet, vpc *cdbm.Vpc, r
 	for _, p := range prefixes {
 		p.ReserveFirst = reservedIPCount
 	}
-	return &cwssaws.NetworkSegmentCreationRequest{
+	req := &cwssaws.NetworkSegmentCreationRequest{
 		Id:          subnetProto.Id,
 		Name:        subnetProto.Name,
 		SubdomainId: subnetProto.SubdomainId,
@@ -104,6 +104,13 @@ func (scr *APISubnetCreateRequest) ToProto(subnet *cdbm.Subnet, vpc *cdbm.Vpc, r
 		Mtu:         subnetProto.Mtu,
 		Prefixes:    prefixes,
 	}
+	// A ToR VPC's hosts attach through their NIC, so its Subnets are HostInband
+	// segments in Core: the fabric manager reads the subnet, gateway and VLAN
+	// from that segment when it declares the VRF on the leaf switches.
+	if cdbm.VpcTypeBindsSubnetsToHostInband(vpc.NetworkVirtualizationType) {
+		req.SegmentType = cwssaws.NetworkSegmentType_HOST_INBAND
+	}
+	return req
 }
 
 // APISubnetUpdateRequest is the data structure to capture user request to update a Subnet

@@ -47,7 +47,7 @@ ResetMachineBmc Reset Machine BMC
 
 Reset BMC of a specific Machine.
 
-User must have authorization role with `PROVIDER_ADMIN` suffix.
+User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

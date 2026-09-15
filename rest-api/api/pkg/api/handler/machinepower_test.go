@@ -216,3 +216,50 @@ func TestMachinePowerControlHandlerRejectsEmptyMachineID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
+
+func TestMachinePowerControlHandlerAllowsTenantHoldingInstance(t *testing.T) {
+	msg := "power control accepted"
+	fixture := newMachinePowerHandlerFixture(t, &cwssaws.AdminPowerControlResponse{Msg: &msg})
+	grant := testGrantTenantOnMachine(t, fixture.dbSession, fixture.machineID, true, false)
+	fixture.org, fixture.user = grant.org, grant.user
+
+	rec := fixture.request(t, http.MethodPatch, "/", model.APIMachinePowerControlRequest{Action: model.MachinePowerActionGracefulRestart, AcknowledgeAttachedInstance: cutil.GetPtr(true)})
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, cwssaws.Forge_AdminPowerControl_FullMethodName, fixture.proxiedReq.FullMethod)
+
+	var coreReq cwssaws.AdminPowerControlRequest
+	require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreReq))
+	assert.Equal(t, fixture.machineID, coreReq.GetMachineId())
+	assert.Equal(t, cwssaws.AdminPowerControlRequest_GracefulRestart, coreReq.GetAction())
+}
+
+func TestMachinePowerControlHandlerTenantMustAcknowledgeItsInstance(t *testing.T) {
+	fixture := newMachinePowerHandlerFixture(t, nil)
+	grant := testGrantTenantOnMachine(t, fixture.dbSession, fixture.machineID, true, false)
+	fixture.org, fixture.user = grant.org, grant.user
+
+	rec := fixture.request(t, http.MethodPatch, "/", model.APIMachinePowerControlRequest{Action: model.MachinePowerActionOn})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, fixture.proxiedReq.FullMethod)
+}
+
+func TestMachinePowerControlHandlerHidesMachineFromTenantWithoutInstance(t *testing.T) {
+	fixture := newMachinePowerHandlerFixture(t, nil)
+	grant := testGrantTenantOnMachine(t, fixture.dbSession, fixture.machineID, false, false)
+	fixture.org, fixture.user = grant.org, grant.user
+
+	rec := fixture.request(t, http.MethodPatch, "/", model.APIMachinePowerControlRequest{Action: model.MachinePowerActionOn})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, fixture.proxiedReq.FullMethod)
+}
+
+func TestMachinePowerControlHandlerAllowsPrivilegedTenantWithProviderAccount(t *testing.T) {
+	msg := "power control accepted"
+	fixture := newMachinePowerHandlerFixture(t, &cwssaws.AdminPowerControlResponse{Msg: &msg})
+	grant := testGrantTenantOnMachine(t, fixture.dbSession, fixture.machineID, false, true)
+	fixture.org, fixture.user = grant.org, grant.user
+
+	rec := fixture.request(t, http.MethodPatch, "/", model.APIMachinePowerControlRequest{Action: model.MachinePowerActionOn})
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, cwssaws.Forge_AdminPowerControl_FullMethodName, fixture.proxiedReq.FullMethod)
+}

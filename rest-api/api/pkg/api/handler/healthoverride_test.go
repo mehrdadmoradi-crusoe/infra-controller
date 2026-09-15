@@ -42,6 +42,39 @@ func TestListMachineHealthReportHandlerProxiesRequest(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "password")
 }
 
+func TestListMachineHealthReportHandlerAllowsTenantHoldingInstance(t *testing.T) {
+	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &cwssaws.ListHealthReportResponse{
+		HealthReportEntries: []*cwssaws.HealthReportEntry{
+			{
+				Mode: cwssaws.HealthReportApplyMode_Merge,
+				Report: &cwssaws.HealthReport{
+					Source: "fabric-witness",
+					Alerts: []*cwssaws.HealthProbeAlert{{Id: "FabricWitnessMismatch", Message: "fabric refused to attach port"}},
+				},
+			},
+		},
+	})
+	grant := testGrantTenantOnMachine(t, fixture.DBSession, fixture.MachineID, true, false)
+	fixture.Org, fixture.User = grant.org, grant.user
+	handler := NewListMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
+
+	rec := fixture.Request(t, handler.Handle, http.MethodGet, "/", nil, "")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, cwssaws.Forge_ListMachineHealthReports_FullMethodName, fixture.ProxiedReq.FullMethod)
+	assert.Contains(t, rec.Body.String(), "fabric-witness")
+}
+
+func TestListMachineHealthReportHandlerHidesMachineFromTenantWithoutInstance(t *testing.T) {
+	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
+	grant := testGrantTenantOnMachine(t, fixture.DBSession, fixture.MachineID, false, false)
+	fixture.Org, fixture.User = grant.org, grant.user
+	handler := NewListMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
+
+	rec := fixture.Request(t, handler.Handle, http.MethodGet, "/", nil, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, fixture.ProxiedReq.FullMethod)
+}
+
 func TestInsertMachineHealthReportHandlerProxiesRequest(t *testing.T) {
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewInsertMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)

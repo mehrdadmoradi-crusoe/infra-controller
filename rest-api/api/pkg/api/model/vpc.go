@@ -125,7 +125,7 @@ func (ascr APIVpcCreateRequest) Validate() error {
 	if ascr.NetworkVirtualizationType != nil {
 		if !cdbm.VpcNetworkVirtualzationTypeMap[*ascr.NetworkVirtualizationType] {
 			return validation.Errors{
-				"networkVirtualizationType": errors.New("ETHERNET_VIRTUALIZER, FNN, and FLAT are currently supported"),
+				"networkVirtualizationType": errors.New("ETHERNET_VIRTUALIZER, FNN, FLAT, and TOR are currently supported"),
 			}
 		}
 	}

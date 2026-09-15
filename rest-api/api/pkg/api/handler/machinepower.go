@@ -4,7 +4,6 @@
 package handler
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -46,7 +45,7 @@ func NewMachinePowerControlHandler(dbSession *cdb.Session, scp *sc.ClientPool, _
 
 // Handle godoc
 // @Summary Machine Power Control
-// @Description Power control a Machine through NICo Core. Provider Admin only.
+// @Description Power control a Machine through NICo Core. Provider Admins and Viewers for their Machines; Tenant Admins for Machines their Tenant holds an Instance on.
 // @Tags machine-power
 // @Accept json
 // @Produce json
@@ -93,28 +92,9 @@ func (h MachinePowerControlHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
 
-	provider, _, apiError := common.IsProviderOrTenant(ctx, logger, h.dbSession, org, dbUser, true, true)
+	machine, apiError := outOfBandMachineAccess(ctx, logger, h.dbSession, org, dbUser, machineID)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
-	}
-
-	if provider == nil {
-		logger.Warn().Msg("user does not have Provider role, access denied")
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
-	}
-
-	machine, err := cdbm.NewMachineDAO(h.dbSession).GetByID(ctx, nil, machineID, []string{cdbm.SiteRelationName}, false)
-	if err != nil {
-		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Machine with specified ID", nil)
-		}
-		logger.Error().Err(err).Msg("failed to retrieve Machine details from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Machine details, DB error", nil)
-	}
-
-	if machine.InfrastructureProviderID != provider.ID {
-		logger.Error().Msg("Machine doesn't belong to org's Infrastructure provider")
-		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Machine with specified ID", nil)
 	}
 
 	if machine.IsMissingOnSite {

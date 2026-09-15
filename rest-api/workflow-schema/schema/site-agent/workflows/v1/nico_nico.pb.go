@@ -401,6 +401,12 @@ const (
 	// between Flat VPCs and other VPCs is the network operator's
 	// responsibility.
 	VpcVirtualizationType_FLAT VpcVirtualizationType = 6
+	// TOR is for VPCs whose tenant VRF is enforced on the ToR/leaf switch
+	// rather than the DPU. The host attaches via its NIC; NICo declares the
+	// per-VPC VRF/VPC intent and delegates switch programming to an external
+	// K8s-native fabric controller (Hedgehog/EDA). NICo never writes the
+	// underlay. See the carbide-fabric crate.
+	VpcVirtualizationType_TOR VpcVirtualizationType = 7
 )
 
 // Enum value maps for VpcVirtualizationType.
@@ -412,6 +418,7 @@ var (
 		4: "FNN_L3",
 		5: "FNN",
 		6: "FLAT",
+		7: "TOR",
 	}
 	VpcVirtualizationType_value = map[string]int32{
 		"ETHERNET_VIRTUALIZER":           0,
@@ -420,6 +427,7 @@ var (
 		"FNN_L3":                         4,
 		"FNN":                            5,
 		"FLAT":                           6,
+		"TOR":                            7,
 	}
 )
 
@@ -58394,8 +58402,8 @@ func (x *GetMachineBootInterfacesResponse) GetDivergent() bool {
 
 type DNSMessage_DNSQuestion struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	QName         *string                `protobuf:"bytes,1,opt,name=q_name,json=qName,proto3,oneof" json:"q_name,omitempty"` // FQDN including trailing dot
-	QType         *uint32                `protobuf:"varint,2,opt,name=q_type,json=qType,proto3,oneof" json:"q_type,omitempty"`
+	QName         *string                `protobuf:"bytes,1,opt,name=q_name,json=qName,proto3,oneof" json:"q_name,omitempty"`     // FQDN including trailing dot
+	QType         *uint32                `protobuf:"varint,2,opt,name=q_type,json=qType,proto3,oneof" json:"q_type,omitempty"`    //
 	QClass        *uint32                `protobuf:"varint,3,opt,name=q_class,json=qClass,proto3,oneof" json:"q_class,omitempty"` // Usually 1 (IN)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -64949,7 +64957,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x12ROTATION_HOST_UEFI\x10\x02\x12\x15\n" +
 	"\x11ROTATION_DPU_UEFI\x10\x03\x12\x11\n" +
 	"\rROTATION_NVOS\x10\x04\x12\x19\n" +
-	"\x15ROTATION_LOCKDOWN_IKM\x10\x05*\x89\x01\n" +
+	"\x15ROTATION_LOCKDOWN_IKM\x10\x05*\x92\x01\n" +
 	"\x15VpcVirtualizationType\x12\x18\n" +
 	"\x14ETHERNET_VIRTUALIZER\x10\x00\x12&\n" +
 	"\x1eETHERNET_VIRTUALIZER_WITH_NVUE\x10\x02\x1a\x02\b\x01\x12\x0f\n" +
@@ -64957,7 +64965,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
 	"\x06FNN_L3\x10\x04\x12\a\n" +
 	"\x03FNN\x10\x05\x12\b\n" +
-	"\x04FLAT\x10\x06*Q\n" +
+	"\x04FLAT\x10\x06\x12\a\n" +
+	"\x03TOR\x10\a*Q\n" +
 	"\x0fPrefixMatchType\x12\x10\n" +
 	"\fPREFIX_EXACT\x10\x00\x12\x13\n" +
 	"\x0fPREFIX_CONTAINS\x10\x01\x12\x17\n" +

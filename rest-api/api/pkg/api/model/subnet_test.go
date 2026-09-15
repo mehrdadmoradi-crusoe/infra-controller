@@ -15,6 +15,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cwssaws "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/schema/site-agent/workflows/v1"
 )
 
 func TestAPISubnetCreateRequest_Validate(t *testing.T) {
@@ -156,6 +157,25 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 		req := scr.ToProto(subnet, vpcWithCtrl, 2)
 		require.NotNil(t, req.VpcId)
 		assert.Equal(t, ctrlID.String(), req.VpcId.Value)
+	})
+
+	t.Run("creates Subnets of ToR VPCs as HostInband segments", func(t *testing.T) {
+		torVpc := &cdbm.Vpc{ID: vpcID, NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcTor)}
+		scr := APISubnetCreateRequest{}
+		req := scr.ToProto(subnet, torVpc, 2)
+		assert.Equal(t, cwssaws.NetworkSegmentType_HOST_INBAND, req.SegmentType)
+		require.Len(t, req.Prefixes, 1)
+		require.NotNil(t, req.Prefixes[0].Gateway)
+		assert.Equal(t, gateway, *req.Prefixes[0].Gateway)
+	})
+
+	t.Run("leaves Subnets of Ethernet Virtualizer VPCs as tenant segments", func(t *testing.T) {
+		evVpc := &cdbm.Vpc{ID: vpcID, NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcEthernetVirtualizer)}
+		scr := APISubnetCreateRequest{}
+		req := scr.ToProto(subnet, evVpc, 2)
+		assert.Equal(t, cwssaws.NetworkSegmentType_TENANT, req.SegmentType)
+		untyped := scr.ToProto(subnet, vpc, 2)
+		assert.Equal(t, cwssaws.NetworkSegmentType_TENANT, untyped.SegmentType)
 	})
 }
 

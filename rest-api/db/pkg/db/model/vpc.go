@@ -44,6 +44,11 @@ const (
 	VpcFNNL3                       = "FNN_L3"
 	VpcFNN                         = "FNN"
 	VpcFlat                        = "FLAT"
+	// VpcTor is for VPCs whose tenant VRF is enforced on the top-of-rack
+	// switch rather than a DPU. Hosts attach through their NIC on a
+	// HostInband segment; NICo declares the per-VPC intent and delegates
+	// switch programming to the site's fabric controller.
+	VpcTor = "TOR"
 )
 
 var (
@@ -71,6 +76,7 @@ var (
 		VpcEthernetVirtualizer: true,
 		VpcFNN:                 true,
 		VpcFlat:                true,
+		VpcTor:                 true,
 	}
 
 	// vpcTypeCapabilities encodes the REST-tier capability matrix for
@@ -90,13 +96,46 @@ var (
 		// Instances to opt in to NICo-resolved interface configuration
 		// via `auto: true`. Flat-only today.
 		supportsAutoInterface bool
+
+		// supportsSubnets is true for VPC types whose tenants carve
+		// Subnets (network segments) out of the VPC through the REST
+		// API. Ethernet Virtualizer and ToR today.
+		supportsSubnets bool
+
+		// hostInbandSubnets is true for VPC types whose Subnets are
+		// created as HostInband network segments in Core, because the
+		// host attaches through its NIC rather than an overlay on a
+		// DPU. ToR-only today.
+		hostInbandSubnets bool
 	}{
-		VpcEthernetVirtualizer:         {},
+		VpcEthernetVirtualizer:         {supportsSubnets: true},
 		VpcEthernetVirtualizerWithNVUE: {},
 		VpcFNN:                         {supportsRoutingProfile: true},
 		VpcFlat:                        {supportsAutoInterface: true},
+		VpcTor:                         {supportsSubnets: true, hostInbandSubnets: true},
 	}
 )
+
+// VpcTypeSupportsSubnets reports whether Tenants may create Subnets in
+// VPCs of the given network-virtualization type. A nil pointer (no type
+// recorded on the VPC) returns true, preserving the legacy behaviour of
+// rows created before the type was stored, which are Ethernet Virtualizer.
+func VpcTypeSupportsSubnets(virtType *string) bool {
+	if virtType == nil {
+		return true
+	}
+	return vpcTypeCapabilities[*virtType].supportsSubnets
+}
+
+// VpcTypeBindsSubnetsToHostInband reports whether Subnets of VPCs of the
+// given network-virtualization type are created as HostInband network
+// segments in Core. A nil pointer returns false.
+func VpcTypeBindsSubnetsToHostInband(virtType *string) bool {
+	if virtType == nil {
+		return false
+	}
+	return vpcTypeCapabilities[*virtType].hostInbandSubnets
+}
 
 // VpcTypeSupportsRoutingProfile reports whether VPCs of the given
 // network-virtualization type accept a `routingProfile` on create.
@@ -209,6 +248,8 @@ func (vpc *Vpc) ToProto() *cwssaws.Vpc {
 			nwvt = cwssaws.VpcVirtualizationType_FNN
 		case cwssaws.VpcVirtualizationType_FLAT.String():
 			nwvt = cwssaws.VpcVirtualizationType_FLAT
+		case cwssaws.VpcVirtualizationType_TOR.String():
+			nwvt = cwssaws.VpcVirtualizationType_TOR
 		}
 		proto.NetworkVirtualizationType = &nwvt
 	}

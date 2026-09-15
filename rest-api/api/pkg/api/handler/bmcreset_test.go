@@ -37,6 +37,32 @@ func TestBmcResetHandlerProxiesRequest(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "password")
 }
 
+func TestBmcResetHandlerAllowsTenantHoldingInstance(t *testing.T) {
+	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &cwssaws.AdminBmcResetResponse{})
+	grant := testGrantTenantOnMachine(t, fixture.DBSession, fixture.MachineID, true, false)
+	fixture.Org, fixture.User = grant.org, grant.user
+	handler := NewBmcResetHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
+
+	rec := fixture.Request(t, handler.Handle, http.MethodPost, "/", model.APIBmcResetRequest{UseIpmiTool: cutil.GetPtr(true)}, "")
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, cwssaws.Forge_AdminBmcReset_FullMethodName, fixture.ProxiedReq.FullMethod)
+
+	var coreReq cwssaws.AdminBmcResetRequest
+	require.NoError(t, protojson.Unmarshal(fixture.ProxiedReq.RequestJSON, &coreReq))
+	assert.Equal(t, fixture.MachineID, coreReq.GetMachineId())
+}
+
+func TestBmcResetHandlerHidesMachineFromTenantWithoutInstance(t *testing.T) {
+	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
+	grant := testGrantTenantOnMachine(t, fixture.DBSession, fixture.MachineID, false, false)
+	fixture.Org, fixture.User = grant.org, grant.user
+	handler := NewBmcResetHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
+
+	rec := fixture.Request(t, handler.Handle, http.MethodPost, "/", model.APIBmcResetRequest{UseIpmiTool: cutil.GetPtr(true)}, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, fixture.ProxiedReq.FullMethod)
+}
+
 func TestBmcResetHandlerRequiresRequestBody(t *testing.T) {
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewBmcResetHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)

@@ -134,9 +134,9 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant for VPC in request does not match tenant in org", nil)
 	}
 
-	// Verify if vpc is ethernet virtualized
-	if vpc.NetworkVirtualizationType != nil && *vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnets", vpc.ID), nil)
+	// Verify that the VPC's network virtualization type carves Subnets: Ethernet Virtualizer (DPU overlay) or ToR (VRF on the leaf switch)
+	if !cdbm.VpcTypeSupportsSubnets(vpc.NetworkVirtualizationType) {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have Ethernet Virtualizer or ToR network virtualization type in order to create Subnets", vpc.ID), nil)
 	}
 
 	// Verify if vpc is ready
