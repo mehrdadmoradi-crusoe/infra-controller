@@ -35,40 +35,53 @@ const machineNotFoundMessage = "Could not find Machine with specified ID"
 // The Machine is loaded with its Site relation so callers can check the
 // Site's registration state without a second query.
 func outOfBandMachineAccess(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, dbUser *cdbm.User, machineID string) (*cdbm.Machine, *cutil.APIError) {
+	machine, _, apiErr := outOfBandMachineAccessByRole(ctx, logger, dbSession, org, dbUser, machineID)
+	return machine, apiErr
+}
+
+// outOfBandMachineAccessByRole is outOfBandMachineAccess, and additionally
+// reports whether the caller reached the Machine as the Provider.
+//
+// Some operations are not symmetric between the two roles: an approval is only
+// worth something when the approver is not the requester, so the endpoints that
+// approve or apply a requested change require the Provider. They need the same
+// reach check as everything else, so it lives here once rather than being
+// restated next to each of them.
+func outOfBandMachineAccessByRole(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, dbUser *cdbm.User, machineID string) (*cdbm.Machine, bool, *cutil.APIError) {
 	provider, tenant, apiErr := common.IsProviderOrTenant(ctx, logger, dbSession, org, dbUser, true, false)
 	if apiErr != nil {
-		return nil, apiErr
+		return nil, false, apiErr
 	}
 
 	machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machineID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return nil, cutil.NewAPIError(http.StatusNotFound, machineNotFoundMessage, nil)
+			return nil, false, cutil.NewAPIError(http.StatusNotFound, machineNotFoundMessage, nil)
 		}
 		logger.Error().Err(err).Msg("failed to retrieve Machine details from DB")
-		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine details, DB error", nil)
+		return nil, false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine details, DB error", nil)
 	}
 
 	switch {
 	case provider != nil:
 		if machine.InfrastructureProviderID != provider.ID {
 			logger.Warn().Msg("Machine doesn't belong to org's Infrastructure Provider")
-			return nil, cutil.NewAPIError(http.StatusNotFound, machineNotFoundMessage, nil)
+			return nil, false, cutil.NewAPIError(http.StatusNotFound, machineNotFoundMessage, nil)
 		}
+		return machine, true, nil
 	case tenant != nil:
 		reaches, apiErr := tenantReachesMachine(ctx, logger, dbSession, tenant, machine)
 		if apiErr != nil {
-			return nil, apiErr
+			return nil, false, apiErr
 		}
 		if !reaches {
 			logger.Warn().Msg("Tenant holds no Instance on the Machine and no privileged account with its Infrastructure Provider")
-			return nil, cutil.NewAPIError(http.StatusNotFound, machineNotFoundMessage, nil)
+			return nil, false, cutil.NewAPIError(http.StatusNotFound, machineNotFoundMessage, nil)
 		}
+		return machine, false, nil
 	default:
-		return nil, cutil.NewAPIError(http.StatusForbidden, "User does not have Provider or Tenant Admin role with org", nil)
+		return nil, false, cutil.NewAPIError(http.StatusForbidden, "User does not have Provider or Tenant Admin role with org", nil)
 	}
-
-	return machine, nil
 }
 
 // tenantReachesMachine reports whether the Tenant is associated with the

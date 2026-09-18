@@ -592,6 +592,35 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewWithdrawMachineRepairRequestHandler(dbSession, scp, cfg),
 		},
+		// A BIOS or BMC change is requested, approved and only then applied.
+		// Requesting and listing are open to whoever reaches the Machine;
+		// approving and applying require a Provider role, so the approver is
+		// never the requester.
+		{
+			Path:    apiPathPrefix + "/machine/:id/redfish-action",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateRedfishActionHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/redfish-action",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewListRedfishActionsHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/redfish-action/:requestId/approve",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewApproveRedfishActionHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/redfish-action/:requestId/apply",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewApplyRedfishActionHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/redfish-action/:requestId",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewCancelRedfishActionHandler(dbSession, scp, cfg),
+		},
 		{
 			Path:    apiPathPrefix + "/machine/:id/health-report",
 			Method:  http.MethodPut,

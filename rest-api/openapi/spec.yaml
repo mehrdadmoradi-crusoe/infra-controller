@@ -9205,6 +9205,225 @@ paths:
         Reset BMC of a specific Machine.
 
         User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+  '/v2/org/{org}/nico/machine/{machineId}/redfish-action':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    post:
+      summary: Request a BIOS or BMC change
+      operationId: create-machine-redfish-action
+      tags:
+        - Machine
+      description: |-
+        Request a change to the Machine's BIOS or BMC through the audited proxy.
+
+        Nothing is applied by this call. The change is recorded with its requester and waits for approval; a Provider then approves it and applies it. The caller never holds a BMC credential, and never names a management address: the Machine's management controller is resolved from the Machine itself.
+
+        `parameters` is passed to the controller exactly as submitted, so that what an approver reads is what the controller receives.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineRedfishActionRequest'
+            examples:
+              set-boot-mode:
+                value:
+                  action: Bios.ChangeSettings
+                  target: /redfish/v1/Systems/1/Bios/Settings
+                  parameters: '{"Attributes":{"BootMode":"Uefi"}}'
+      responses:
+        '202':
+          description: The change was recorded and is awaiting approval
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineRedfishActionCreated'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The Machine's management controller has not been discovered yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+    get:
+      summary: List BIOS and BMC changes on a Machine
+      operationId: list-machine-redfish-actions
+      tags:
+        - Machine
+      description: |-
+        Every requested, approved and applied change on the Machine, with who asked and who agreed.
+
+        Management addresses and board serials are not returned: the management network is not addressable through this API.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MachineRedfishAction'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/machine/{machineId}/redfish-action/{requestId}/approve':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: integer
+          format: int64
+        name: requestId
+        in: path
+        required: true
+        description: ID of the requested change
+    post:
+      summary: Approve a requested BIOS or BMC change
+      operationId: approve-machine-redfish-action
+      tags:
+        - Machine
+      description: |-
+        Agree to a change someone else requested. Approving does not apply it.
+
+        This requires a `PROVIDER_ADMIN` role: an approval given by the party that asked for the change would not be an approval. A Tenant calling it is refused even for a Machine it holds.
+      responses:
+        '202':
+          description: The approval was recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/machine/{machineId}/redfish-action/{requestId}/apply':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: integer
+          format: int64
+        name: requestId
+        in: path
+        required: true
+        description: ID of the requested change
+    post:
+      summary: Apply an approved BIOS or BMC change
+      operationId: apply-machine-redfish-action
+      tags:
+        - Machine
+      description: |-
+        Carry out a change that has been approved. Requires a `PROVIDER_ADMIN` role.
+      responses:
+        '202':
+          description: The change was accepted for application
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/machine/{machineId}/redfish-action/{requestId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: integer
+          format: int64
+        name: requestId
+        in: path
+        required: true
+        description: ID of the requested change
+    delete:
+      summary: Withdraw a requested BIOS or BMC change
+      operationId: cancel-machine-redfish-action
+      tags:
+        - Machine
+      description: |-
+        Withdraw a change before it is applied. Withdrawing takes a pending change away rather than making one, so whoever can reach the Machine may do it.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+      responses:
+        '202':
+          description: The change was withdrawn
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/machine/{machineId}/repair-request':
     parameters:
       - schema:
@@ -14127,6 +14346,96 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RackIssue'
+    MachineRedfishActionRequest:
+      title: MachineRedfishActionRequest
+      type: object
+      description: A requested change to a Machine's BIOS or BMC, applied only after approval.
+      properties:
+        action:
+          type: string
+          description: The Redfish action name.
+          example: Bios.ChangeSettings
+        target:
+          type: string
+          description: The Redfish URI the action is posted to.
+          example: /redfish/v1/Systems/1/Bios/Settings
+        parameters:
+          type: string
+          description: >-
+            The JSON body for the action, as a string. It is passed to the controller exactly as
+            submitted, so that what an approver reads is what the controller receives.
+      required:
+        - action
+        - target
+    MachineRedfishActionCreated:
+      title: MachineRedfishActionCreated
+      type: object
+      properties:
+        requestId:
+          type: integer
+          format: int64
+          description: Identifies the change for approve, apply and withdraw.
+        status:
+          type: string
+          enum:
+            - Pending
+            - Approved
+            - Applied
+      required:
+        - requestId
+        - status
+    MachineRedfishAction:
+      title: MachineRedfishAction
+      type: object
+      description: >-
+        One requested, approved or applied change. Management addresses and board serials are not
+        included: the management network is not addressable through this API.
+      properties:
+        requestId:
+          type: integer
+          format: int64
+        requester:
+          type: string
+          description: Who asked for the change.
+        approvers:
+          type: array
+          items:
+            type: string
+          description: Who has agreed to it so far.
+        approvedAt:
+          type: array
+          items:
+            type: string
+            format: date-time
+          description: When each approver agreed, at the same index as approvers.
+        action:
+          type: string
+        target:
+          type: string
+        parameters:
+          type: string
+        appliedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        applier:
+          type:
+            - string
+            - 'null'
+        status:
+          type: string
+          enum:
+            - Pending
+            - Approved
+            - Applied
+          description: Derived from the approvals and the applied time.
+      required:
+        - requestId
+        - requester
+        - action
+        - target
+        - status
     MachineRepairRequest:
       type: object
       title: MachineRepairRequest
