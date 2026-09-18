@@ -58,6 +58,10 @@ type NICoServerImpl struct {
 	tk  map[string]*cwssaws.TenantKeyset
 	ibp map[string]*cwssaws.IBPartition
 	em  map[string]*cwssaws.ExpectedMachine
+	// hr holds health report entries per Machine, keyed by source, so the
+	// out-of-band surface (list, insert, remove) behaves like Core: entries
+	// merge by source and a remove takes only the named one.
+	hr  map[string]map[string]*cwssaws.HealthReportEntry
 	eps map[string]*cwssaws.ExpectedPowerShelf
 	es  map[string]*cwssaws.ExpectedSwitch
 	er  map[string]*cwssaws.ExpectedRack
@@ -480,6 +484,83 @@ func (f *NICoServerImpl) FindMachineIds(ctx context.Context, req *cwssaws.Machin
 	}
 
 	return &response, nil
+}
+
+// ~~~~~ Out-of-band operations ~~~~~ //
+//
+// The real Core drives these through the BMC proxy. The mock records what was
+// asked so a caller can prove the request reached Core with the right
+// arguments, which is what the REST tier is responsible for.
+
+// AdminPowerControl accepts a power action for a Machine it knows about.
+func (f *NICoServerImpl) AdminPowerControl(_ context.Context, req *cwssaws.AdminPowerControlRequest) (*cwssaws.AdminPowerControlResponse, error) {
+	if req == nil || req.GetMachineId() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "machine_id is required")
+	}
+	// The mock's own fleet is generated with random identifiers at start, so it
+	// is not the register of which Machines exist. Whether the caller may reach
+	// this Machine at all was already decided by the REST tier, which is the
+	// layer under test here, so any Machine is answered for.
+	log.Info().Str("machine_id", req.GetMachineId()).Str("action", req.GetAction().String()).Msg("mock core: power control")
+	msg := fmt.Sprintf("%s accepted for %s", req.GetAction().String(), req.GetMachineId())
+	return &cwssaws.AdminPowerControlResponse{Msg: &msg}, nil
+}
+
+// AdminBmcReset accepts a management controller reset for a known Machine.
+func (f *NICoServerImpl) AdminBmcReset(_ context.Context, req *cwssaws.AdminBmcResetRequest) (*cwssaws.AdminBmcResetResponse, error) {
+	if req == nil || req.GetMachineId() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "machine_id is required")
+	}
+	log.Info().Str("machine_id", req.GetMachineId()).Bool("use_ipmitool", req.GetUseIpmitool()).Msg("mock core: bmc reset")
+	return &cwssaws.AdminBmcResetResponse{}, nil
+}
+
+// ListMachineHealthReports returns the entries recorded for a Machine.
+func (f *NICoServerImpl) ListMachineHealthReports(_ context.Context, req *cwssaws.MachineId) (*cwssaws.ListHealthReportResponse, error) {
+	if req == nil || req.GetId() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "machine id is required")
+	}
+	response := cwssaws.ListHealthReportResponse{}
+	sources := make([]string, 0, len(f.hr[req.GetId()]))
+	for source := range f.hr[req.GetId()] {
+		sources = append(sources, source)
+	}
+	// Stable order so repeated reads of unchanged health return the same list.
+	sort.Strings(sources)
+	for _, source := range sources {
+		response.HealthReportEntries = append(response.HealthReportEntries, f.hr[req.GetId()][source])
+	}
+	return &response, nil
+}
+
+// InsertMachineHealthReport records an entry under its own source, merging
+// with whatever other sources are already present.
+func (f *NICoServerImpl) InsertMachineHealthReport(_ context.Context, req *cwssaws.InsertMachineHealthReportRequest) (*emptypb.Empty, error) {
+	if req == nil || req.GetMachineId() == nil || req.GetHealthReportEntry() == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "machine_id and health_report_entry are required")
+	}
+	source := req.GetHealthReportEntry().GetReport().GetSource()
+	if source == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "health report source is required")
+	}
+	machineID := req.GetMachineId().GetId()
+	if _, found := f.hr[machineID]; !found {
+		f.hr[machineID] = make(map[string]*cwssaws.HealthReportEntry)
+	}
+	f.hr[machineID][source] = req.GetHealthReportEntry()
+	log.Info().Str("machine_id", machineID).Str("source", source).Msg("mock core: health report inserted")
+	return &emptypb.Empty{}, nil
+}
+
+// RemoveMachineHealthReport drops one source and leaves the rest in place.
+func (f *NICoServerImpl) RemoveMachineHealthReport(_ context.Context, req *cwssaws.RemoveMachineHealthReportRequest) (*emptypb.Empty, error) {
+	if req == nil || req.GetMachineId() == nil || req.GetSource() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "machine_id and source are required")
+	}
+	machineID := req.GetMachineId().GetId()
+	delete(f.hr[machineID], req.GetSource())
+	log.Info().Str("machine_id", machineID).Str("source", req.GetSource()).Msg("mock core: health report removed")
+	return &emptypb.Empty{}, nil
 }
 
 func (f *NICoServerImpl) SetMaintenance(context.Context, *cwssaws.MaintenanceRequest) (*emptypb.Empty, error) {
@@ -1826,6 +1907,7 @@ func NICoTest(secs int) {
 		tk:               make(map[string]*cwssaws.TenantKeyset),
 		ibp:              make(map[string]*cwssaws.IBPartition),
 		em:               make(map[string]*cwssaws.ExpectedMachine),
+		hr:               make(map[string]map[string]*cwssaws.HealthReportEntry),
 		eps:              make(map[string]*cwssaws.ExpectedPowerShelf),
 		es:               make(map[string]*cwssaws.ExpectedSwitch),
 		er:               make(map[string]*cwssaws.ExpectedRack),

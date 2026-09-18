@@ -583,6 +583,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewListMachineHealthReportHandler(dbSession, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/machine/:id/repair-request",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewMachineRepairRequestHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/repair-request",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewWithdrawMachineRepairRequestHandler(dbSession, scp, cfg),
+		},
+		{
 			Path:    apiPathPrefix + "/machine/:id/health-report",
 			Method:  http.MethodPut,
 			Handler: apiHandler.NewInsertMachineHealthReportHandler(dbSession, scp, cfg),

@@ -9205,6 +9205,86 @@ paths:
         Reset BMC of a specific Machine.
 
         User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+  '/v2/org/{org}/nico/machine/{machineId}/repair-request':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    post:
+      summary: Request repair for a Machine
+      tags:
+        - Machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineRepairRequest'
+            examples:
+              faulty-accelerator:
+                value:
+                  summary: GPU 3 reports XID 79 on every job
+                  target: GPU
+                  component: '3'
+                  urgency: HIGH
+              flapping-link:
+                value:
+                  summary: the front-end link keeps flapping under load
+                  target: PORT
+                  component: enp1s0f0
+      responses:
+        '202':
+          description: Repair request was recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineRepairRequestResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: create-machine-repair-request
+      description: |-
+        Ask for a Machine, or one part of it, to be repaired.
+
+        The request is recorded against the Machine as a health report under the reserved `tenant-repair-request` source, which is the signal the ticketing integration watches. It merges with the platform's own health sources rather than replacing them, and it is visible in the Machine's health report immediately. `ticketRef` is null until ticketing assigns a reference.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+    delete:
+      summary: Withdraw a Machine repair request
+      tags:
+        - Machine
+      responses:
+        '204':
+          description: Repair request was withdrawn
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: withdraw-machine-repair-request
+      description: |-
+        Withdraw a repair request raised for a Machine, for when the fault turns out to be the customer's own.
+
+        Only the reserved `tenant-repair-request` source is removed; the platform's and the Provider's health sources are untouched.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
   '/v2/org/{org}/nico/machine/{machineId}/dpu/reprovision':
     parameters:
       - schema:
@@ -13947,6 +14027,80 @@ components:
         acknowledgeAttachedInstance:
           type: boolean
           description: Acknowledges that an Instance is currently attached to the Machine.
+    MachineRepairRequest:
+      type: object
+      title: MachineRepairRequest
+      description: Request that a Machine, or one part of it, be repaired
+      required:
+        - summary
+      properties:
+        summary:
+          type: string
+          minLength: 8
+          maxLength: 1000
+          description: What was observed, in the customer's own words. Reaches the operator who picks the work up.
+        target:
+          type: string
+          description: What is believed faulty. Defaults to the whole host.
+          enum:
+            - HOST
+            - PORT
+            - LINK
+            - GPU
+            - STORAGE
+        component:
+          type:
+            - string
+            - 'null'
+          maxLength: 255
+          description: Narrows the target, for example the interface name for a `PORT` request or the device index for a `GPU`.
+        urgency:
+          type: string
+          description: The customer's own assessment. Defaults to `NORMAL`. Provider service levels are a matter for the ticket, not this field.
+          enum:
+            - LOW
+            - NORMAL
+            - HIGH
+            - CRITICAL
+    MachineRepairRequestResponse:
+      type: object
+      title: MachineRepairRequestResponse
+      description: A repair request as recorded against the Machine
+      properties:
+        machineId:
+          type: string
+          description: ID of the Machine the request was recorded against
+        source:
+          type: string
+          description: Health report source the request is recorded under
+        target:
+          type: string
+          description: What is believed faulty, defaulted
+        component:
+          type:
+            - string
+            - 'null'
+          description: The component named in the request, if any
+        urgency:
+          type: string
+          description: The customer's assessment, defaulted
+        summary:
+          type: string
+          description: What was observed
+        status:
+          type: string
+          description: State of the request
+          enum:
+            - Submitted
+        ticketRef:
+          type:
+            - string
+            - 'null'
+          description: Ticket reference, once ticketing has assigned one
+        observedAt:
+          type: string
+          format: date-time
+          description: When the request was recorded
     InfrastructureProvider:
       description: Infrastructure providers own and manage datacenters
       type: object
