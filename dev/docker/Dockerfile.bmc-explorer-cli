@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# bmc-explorer-cli on its own, so it can be run where a BMC is reachable.
+#
+# The lab BMCs sit on a network only the cluster can reach, so the read-only
+# explorer has to run as a Pod rather than from a laptop. This builds just that
+# one binary instead of the whole workspace.
+
+FROM arm64v8/rust:1.96.0-slim-bookworm AS builder
+
+# The subset of the build container's packages that this crate's dependency
+# tree actually needs: TLS and IPMI for the BMC clients, protobuf for the RPC
+# types, and pkg-config to find them.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        clang \
+        cmake \
+        libssl-dev \
+        libssh-dev \
+        libopenipmi-dev \
+        openipmi \
+        libprotobuf-dev \
+        protobuf-compiler \
+        libudev-dev \
+        libtss2-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY . .
+
+RUN cargo build --release -p bmc-explorer-cli \
+    && cp target/release/bmc-explorer-cli /usr/local/bin/bmc-explorer-cli
+
+# Deliberately no slim runtime stage. The binary links against TLS, IPMI and
+# TPM libraries, and reproducing exactly that set in a second image is
+# guesswork that fails at apt rather than at link time. This is a diagnostic
+# tool run by hand as a Job, so image size is not worth that risk: keep the
+# image it was built in, where every library it linked against is present.
+
+ENTRYPOINT ["/usr/local/bin/bmc-explorer-cli"]
