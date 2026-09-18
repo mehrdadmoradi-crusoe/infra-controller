@@ -1030,6 +1030,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewBringUpRackHandler(dbSession, tc, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/rack/:id/issues",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetRackIssuesHandler(dbSession, tc, scp, cfg),
+		},
+		{
 			Path:    apiPathPrefix + "/rack/:id/task",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetRackTasksHandler(dbSession, tc, scp, cfg),

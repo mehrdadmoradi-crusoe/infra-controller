@@ -10355,6 +10355,54 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       tags:
         - Rack
+  '/v2/org/{org}/nico/rack/{id}/issues':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: id
+        in: path
+        required: true
+        description: ID of the Rack
+    get:
+      summary: Get open issues on a Rack
+      tags:
+        - Rack
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the Rack
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RackIssues'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: get-rack-issues
+      description: |-
+        Every unresolved issue in a Rack, gathered in one read, so a delivered tranche can be accepted with its known issues written down.
+
+        Issues come from two places: alerts on the health of each host the Rack's expected build places in it, and Rack components reporting a state that needs attention. A host with no health recorded contributes nothing, because not yet observed is not the same as healthy. If the Rack's component state cannot be read, the host issues are still returned.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Rack on a Site of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Rack holding a Machine the org's Tenant has an Instance on. A Rack outside the caller's reach is reported as not found.
   '/v2/org/{org}/nico/rack/{id}/power':
     parameters:
       - schema:
@@ -14027,6 +14075,58 @@ components:
         acknowledgeAttachedInstance:
           type: boolean
           description: Acknowledges that an Instance is currently attached to the Machine.
+    RackIssue:
+      type: object
+      title: RackIssue
+      description: One unresolved problem somewhere in a Rack
+      properties:
+        machineId:
+          type:
+            - string
+            - 'null'
+          description: Set when the issue belongs to a host
+        component:
+          type:
+            - string
+            - 'null'
+          description: Set when the issue belongs to a Rack component rather than a host
+        source:
+          type: string
+          description: Health source that reported it, or `rack-component` for a component state
+        id:
+          type: string
+          description: Stable alert identifier, so an issue can be matched across reads and across hosts
+        target:
+          type:
+            - string
+            - 'null'
+          description: What within the host or component the alert points at
+        firstObserved:
+          type:
+            - string
+            - 'null'
+          description: When the alert was first raised, where the source recorded it
+        message:
+          type: string
+          description: Operator-facing description
+    RackIssues:
+      type: object
+      title: RackIssues
+      description: Every unresolved issue in a Rack
+      properties:
+        rackId:
+          type: string
+          description: ID of the Rack
+        openCount:
+          type: integer
+          description: Number of issues in the list
+        hosts:
+          type: integer
+          description: Number of hosts the Rack's expected build places in it
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/RackIssue'
     MachineRepairRequest:
       type: object
       title: MachineRepairRequest

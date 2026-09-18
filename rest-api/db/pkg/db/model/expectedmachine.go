@@ -297,6 +297,7 @@ type ExpectedMachineClearInput struct {
 type ExpectedMachineFilterInput struct {
 	ExpectedMachineIDs   []uuid.UUID
 	SiteIDs              []uuid.UUID
+	RackIDs              []string
 	BmcMacAddresses      []string
 	ChassisSerialNumbers []string
 	SkuIDs               []string
@@ -534,6 +535,13 @@ func (emsd ExpectedMachineSQLDAO) setQueryWithFilter(filter ExpectedMachineFilte
 		query = query.Where("em.machine_id IN (?)", bun.In(filter.MachineIDs))
 		if expectedMachineDAOSpan != nil {
 			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "machine_ids", filter.MachineIDs)
+		}
+	}
+
+	if filter.RackIDs != nil {
+		query = query.Where("em.rack_id IN (?)", bun.In(filter.RackIDs))
+		if expectedMachineDAOSpan != nil {
+			emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "rack_ids", filter.RackIDs)
 		}
 	}
 

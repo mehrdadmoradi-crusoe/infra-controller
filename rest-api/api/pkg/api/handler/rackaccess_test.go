@@ -26,6 +26,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/workflow-schema/flow/protobuf/v1"
 )
 
@@ -225,4 +226,9 @@ func TestRackAccessValidationFollowsTheSameReach(t *testing.T) {
 
 	other := validate(f.tenantOrg, f.tenantUser, f.otherRackID)
 	require.Equal(t, http.StatusNotFound, other.Code, other.Body.String())
+}
+
+// paging returns an unbounded page request, for test lookups that want every row.
+func paging() cdbp.PageInput {
+	return cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}
 }
