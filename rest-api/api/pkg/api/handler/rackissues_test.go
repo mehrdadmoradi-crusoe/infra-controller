@@ -123,9 +123,10 @@ func TestRackIssuesGathersHostAlertsAndLeakingComponents(t *testing.T) {
 	assert.Equal(t, "machine-validation", issues.Issues[0].Source)
 	assert.Equal(t, "MemoryLatency", issues.Issues[0].ID)
 	assert.Contains(t, issues.Issues[0].Message, "socket 1")
-	// firstObserved is deliberately not asserted: the cached health report is
-	// decoded by field name, so its snake_case `in_alert_since` key does not
-	// reach InAlertSince. The field is carried when a source populates it.
+	// The snake_case key from the stored report reaches the struct, so the
+	// caller learns how long the alert has been standing.
+	require.NotNil(t, issues.Issues[0].FirstObserved)
+	assert.Equal(t, "2026-09-18T11:04:00Z", *issues.Issues[0].FirstObserved)
 
 	require.NotNil(t, issues.Issues[1].Component)
 	assert.Contains(t, *issues.Issues[1].Component, "10")

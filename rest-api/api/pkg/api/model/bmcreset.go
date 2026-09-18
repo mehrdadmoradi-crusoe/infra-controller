@@ -14,10 +14,15 @@ type APIBmcResetRequest struct {
 }
 
 // Validate validates the APIBmcResetRequest
+//
+// The check is NotNil rather than Required: the caller has to say which
+// mechanism to use, but `false` is one of the two answers. Required treats a
+// pointer to false as absent, so it rejected `{"useIpmiTool": false}` and left
+// the Redfish path unreachable through the API.
 func (r *APIBmcResetRequest) Validate() error {
 	return validation.ValidateStruct(r,
 		validation.Field(&r.UseIpmiTool,
-			validation.Required.Error("a value must be specified for useIpmiTool"),
+			validation.NotNil.Error("a value must be specified for useIpmiTool"),
 		),
 	)
 }

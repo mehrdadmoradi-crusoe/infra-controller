@@ -353,11 +353,24 @@ func (m *Machine) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQ
 }
 
 // returns db.ErrDoesNotExist error if the record is not found
+// The health report is stored as JSONB, so its keys are the `json` tag names.
+// mapstructure.Decode matches on `mapstructure` tags and otherwise on the field
+// name, so a snake_case key like `in_alert_since` never reached InAlertSince
+// and every multi-word field decoded as nil. Decoding with TagName "json"
+// makes the struct tags already on these types authoritative, and keeps any
+// field added later working without a second tag.
 func (m *Machine) GetHealth() (*MachineHealth, error) {
 	var health *MachineHealth
-	serr := mapstructure.Decode(m.Health, &health)
 
-	if serr != nil {
+	decoder, derr := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:  &health,
+		TagName: "json",
+	})
+	if derr != nil {
+		return nil, db.ErrInvalidValue
+	}
+
+	if serr := decoder.Decode(m.Health); serr != nil {
 		return nil, db.ErrInvalidValue
 	}
 
