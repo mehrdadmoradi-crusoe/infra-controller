@@ -185,7 +185,7 @@ func (h RedfishActionHandler) create(c echo.Context, ctx context.Context, logger
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
 
-	bmcIPs, apiErr := h.machineBmcIPs(ctx, logger, stc, machine, site)
+	bmcIPs, apiErr := machineBmcIPs(ctx, logger, stc, machine, site)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
@@ -210,7 +210,7 @@ func (h RedfishActionHandler) create(c echo.Context, ctx context.Context, logger
 
 // list returns the actions Core holds for this Machine.
 func (h RedfishActionHandler) list(c echo.Context, ctx context.Context, logger zerolog.Logger, stc tClient.Client, machine *cdbm.Machine, site *cdbm.Site) error {
-	bmcIPs, apiErr := h.machineBmcIPs(ctx, logger, stc, machine, site)
+	bmcIPs, apiErr := machineBmcIPs(ctx, logger, stc, machine, site)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
@@ -272,7 +272,7 @@ func (h RedfishActionHandler) byID(c echo.Context, ctx context.Context, logger z
 // caller: the addresses belong to the management network, which this API does
 // not expose, and a caller that could name one would be choosing what to
 // reach.
-func (h RedfishActionHandler) machineBmcIPs(ctx context.Context, logger zerolog.Logger, stc tClient.Client, machine *cdbm.Machine, site *cdbm.Site) ([]string, *cutil.APIError) {
+func machineBmcIPs(ctx context.Context, logger zerolog.Logger, stc tClient.Client, machine *cdbm.Machine, site *cdbm.Site) ([]string, *cutil.APIError) {
 	// Core looks a BMC up by hardware address or by chassis serial. Prefer the
 	// address, which identifies the board, and fall back to the serial, which
 	// is what a Machine recorded from an expected build carries before it has

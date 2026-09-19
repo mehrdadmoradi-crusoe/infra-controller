@@ -592,6 +592,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewWithdrawMachineRepairRequestHandler(dbSession, scp, cfg),
 		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/event-log",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetMachineEventLogHandler(dbSession, scp, cfg),
+		},
 		// A BIOS or BMC change is requested, approved and only then applied.
 		// Requesting and listing are open to whoever reaches the Machine;
 		// approving and applying require a Provider role, so the approver is

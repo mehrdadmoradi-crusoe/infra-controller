@@ -9205,6 +9205,81 @@ paths:
         Reset BMC of a specific Machine.
 
         User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+  '/v2/org/{org}/nico/machine/{machineId}/event-log':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: string
+          enum:
+            - system
+            - manager
+          default: system
+        name: source
+        in: query
+        required: false
+        description: Which log to read. `system` is the host's own log; `manager` is the controller's.
+      - schema:
+          type: integer
+          default: 100
+          maximum: 1000
+          minimum: 1
+        name: limit
+        in: query
+        required: false
+        description: Maximum entries to return.
+    get:
+      summary: Read a Machine's management controller event log
+      operationId: get-machine-event-log
+      tags:
+        - Machine
+      description: |-
+        The record of what happened to the host below the operating system: power events, memory errors, thermal excursions. When a host reboots with no explanation, the reason is here, and it survives the reboot.
+
+        The controller serves this as Redfish log services, which are vendor-shaped and untyped. The entries are normalised to one form, and each carries the service it came from, since entry identifiers are only unique within a service. Match on `messageId` rather than on `message` text.
+
+        Entries are newest first. `truncated` is true when the controller held more than were returned, so a short list is not mistaken for a quiet host.
+
+        The caller names a source, never a path: every URI sent to the controller is built by the control plane, and links leaving the controller's own tree are not followed.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineEventLog'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The Machine's management controller has not been discovered yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '502':
+          description: The management controller returned a response this API could not read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/machine/{machineId}/redfish-action':
     parameters:
       - schema:
@@ -14475,6 +14550,74 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RackIssue'
+    MachineEventLog:
+      title: MachineEventLog
+      type: object
+      properties:
+        machineId:
+          type: string
+        source:
+          type: string
+          enum:
+            - system
+            - manager
+        services:
+          type: array
+          items:
+            type: string
+          description: The log services found on the controller and read.
+        truncated:
+          type: boolean
+          description: True when the controller held more entries than were returned.
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineEventLogEntry'
+      required:
+        - machineId
+        - source
+        - services
+        - entries
+        - truncated
+    MachineEventLogEntry:
+      title: MachineEventLogEntry
+      type: object
+      properties:
+        service:
+          type: string
+          description: The log service the entry came from.
+        id:
+          type: string
+          description: Unique within its service, not across the host.
+        created:
+          type:
+            - string
+            - 'null'
+          description: As the controller reported it.
+        severity:
+          type:
+            - string
+            - 'null'
+          description: OK, Warning or Critical where the controller uses Redfish's values.
+        message:
+          type: string
+        messageId:
+          type:
+            - string
+            - 'null'
+          description: The Redfish registry identifier. Match on this rather than on message text.
+        entryType:
+          type:
+            - string
+            - 'null'
+        resolved:
+          type:
+            - boolean
+            - 'null'
+      required:
+        - service
+        - id
+        - message
     MachineRedfishActionRequest:
       title: MachineRedfishActionRequest
       type: object
