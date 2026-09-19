@@ -262,7 +262,11 @@ func TestListRedfishActionsDerivesStatusAndDropsManagementAddresses(t *testing.T
 	assert.Equal(t, model.RedfishActionPending, actions[0].Status)
 	assert.Empty(t, actions[0].Approvers)
 
-	assert.Equal(t, model.RedfishActionApproved, actions[1].Status)
+	// One approval is not enough: Core requires two before an apply is allowed,
+	// so a single approval is AwaitingApproval rather than Approved.
+	assert.Equal(t, model.RedfishActionAwaitingApproval, actions[1].Status)
+	assert.Equal(t, 1, actions[1].ApprovalsHeld)
+	assert.Equal(t, model.RedfishActionRequiredApprovals, actions[1].ApprovalsRequired)
 	assert.Equal(t, []string{"ops@crusoe.example"}, actions[1].Approvers)
 	require.Len(t, actions[1].ApprovedAt, 1)
 

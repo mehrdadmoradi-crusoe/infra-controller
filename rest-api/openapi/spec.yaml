@@ -9227,7 +9227,7 @@ paths:
       description: |-
         Request a change to the Machine's BIOS or BMC through the audited proxy.
 
-        Nothing is applied by this call. The change is recorded with its requester and waits for approval; a Provider then approves it and applies it. The caller never holds a BMC credential, and never names a management address: the Machine's management controller is resolved from the Machine itself.
+        Nothing is applied by this call. The change is recorded with its requester and waits for approval; Providers then approve it and apply it. More than one approval is required, so `approvalsRequired` on the action says how many, and an apply below that is refused. The caller never holds a BMC credential, and never names a management address: the Machine's management controller is resolved from the Machine itself.
 
         `parameters` is passed to the controller exactly as submitted, so that what an approver reads is what the controller receives.
 
@@ -14508,6 +14508,7 @@ components:
           type: string
           enum:
             - Pending
+            - AwaitingApproval
             - Approved
             - Applied
       required:
@@ -14552,13 +14553,24 @@ components:
           type:
             - string
             - 'null'
+        approvalsHeld:
+          type: integer
+          description: How many approvals the change has so far.
+        approvalsRequired:
+          type: integer
+          description: >-
+            How many approvals are needed before it may be applied. Applying below this is
+            refused, so a caller can tell "one more needed" from "ready to apply".
         status:
           type: string
           enum:
             - Pending
+            - AwaitingApproval
             - Approved
             - Applied
-          description: Derived from the approvals and the applied time.
+          description: >-
+            Pending with no approvals, AwaitingApproval while short of the threshold, Approved
+            once it is met, Applied once carried out.
       required:
         - requestId
         - requester

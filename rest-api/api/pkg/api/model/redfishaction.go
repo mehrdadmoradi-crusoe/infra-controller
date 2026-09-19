@@ -83,18 +83,32 @@ type APIRedfishAction struct {
 	// AppliedAt and Applier are set once the change has been carried out.
 	AppliedAt *string `json:"appliedAt"`
 	Applier   *string `json:"applier"`
-	// Status is derived: Pending until approved, Approved until applied, then
-	// Applied. It saves every caller re-deriving the same thing from the
-	// timestamps.
+	// ApprovalsHeld and ApprovalsRequired show the arithmetic behind Status, so
+	// a caller can tell "one more approval needed" from "ready to apply"
+	// without knowing the threshold.
+	ApprovalsHeld     int `json:"approvalsHeld"`
+	ApprovalsRequired int `json:"approvalsRequired"`
+	// Status is derived: Pending with no approvals, AwaitingApproval while
+	// short of the threshold, Approved once it is met, Applied once carried
+	// out.
 	Status string `json:"status"`
 }
 
 // Redfish action statuses.
 const (
-	RedfishActionPending  = "Pending"
-	RedfishActionApproved = "Approved"
-	RedfishActionApplied  = "Applied"
+	RedfishActionPending          = "Pending"
+	RedfishActionAwaitingApproval = "AwaitingApproval"
+	RedfishActionApproved         = "Approved"
+	RedfishActionApplied          = "Applied"
 )
+
+// RedfishActionRequiredApprovals is how many approvals the Core requires
+// before an action may be applied. It mirrors NUM_REQUIRED_APPROVALS in
+// crates/api-core/src/handlers/redfish.rs, which rejects an apply with
+// "insufficient approvals" below it. Reporting Approved after a single
+// approval would tell a caller the change is ready when applying it would
+// still fail, so the threshold is named here rather than assumed to be one.
+const RedfishActionRequiredApprovals = 2
 
 // APIRedfishActionCreated is the response to a create.
 type APIRedfishActionCreated struct {
@@ -125,8 +139,13 @@ func NewAPIRedfishAction(action *cwssaws.RedfishAction) APIRedfishAction {
 		}
 	}
 
-	if len(out.Approvers) > 0 {
+	out.ApprovalsHeld = len(out.Approvers)
+	out.ApprovalsRequired = RedfishActionRequiredApprovals
+	switch {
+	case out.ApprovalsHeld >= RedfishActionRequiredApprovals:
 		out.Status = RedfishActionApproved
+	case out.ApprovalsHeld > 0:
+		out.Status = RedfishActionAwaitingApproval
 	}
 
 	if applied := action.GetAppliedAt(); applied != nil {
