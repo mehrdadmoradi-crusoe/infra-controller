@@ -72,7 +72,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"sku":                       2,
 		"task":                      2,
 		"rule":                      5,
-		"rack":                      15,
+		"rack":                      16,
 		"tray":                      9,
 		"stats":                     4,
 		"identity-config":           3,
