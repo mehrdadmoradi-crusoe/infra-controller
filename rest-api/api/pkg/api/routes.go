@@ -1059,6 +1059,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewBringUpRackHandler(dbSession, tc, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/rack/:id/nvlink-fabric",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetNVLinkFabricHandler(dbSession, scp, cfg),
+		},
+		{
 			Path:    apiPathPrefix + "/rack/:id/issues",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetRackIssuesHandler(dbSession, tc, scp, cfg),

@@ -10574,6 +10574,62 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       tags:
         - Rack
+  '/v2/org/{org}/nico/rack/{id}/nvlink-fabric':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: id
+        in: path
+        required: true
+        description: ID of the Rack
+      - schema:
+          type: string
+        name: siteId
+        in: query
+        required: true
+        description: ID of the Site
+    get:
+      summary: Read the NVLink fabric manager state for a Rack
+      operationId: get-rack-nvlink-fabric
+      tags:
+        - Rack
+      description: |-
+        The fabric manager state of every NVLink switch in the Rack, with where each sits in it.
+
+        An NVL72 rack is one NVLink domain, so when collectives stall the question is about the rack rather than one host. The per-GPU NVLink interfaces are readable elsewhere; this reports whether the fabric manager driving them is up, and on which tray it is not.
+
+        A switch whose fabric manager state could not be read is reported as `Unknown` rather than omitted: a switch that has gone quiet is what a caller most needs to see, and it is not counted as a failure.
+
+        Switch management addresses and BMC details are never returned. The switches are not addressable through this API.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Rack at a Site of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Rack the org's Tenant holds an Instance in. A Rack outside the caller's reach is reported as not found.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RackNVLinkFabric'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site does not have NICo Flow enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/rack/{id}/issues':
     parameters:
       - schema:
@@ -14328,6 +14384,79 @@ components:
         message:
           type: string
           description: Operator-facing description
+    RackNVLinkFabric:
+      title: RackNVLinkFabric
+      type: object
+      description: The fabric manager state across a Rack's NVLink switches.
+      properties:
+        rackId:
+          type: string
+        switchCount:
+          type: integer
+          description: How many NVLink switches the Rack holds.
+        notOkCount:
+          type: integer
+          description: How many report a fabric manager that is not Ok. Unknown does not count.
+        switches:
+          type: array
+          items:
+            $ref: '#/components/schemas/NVLinkSwitchState'
+      required:
+        - rackId
+        - switchCount
+        - notOkCount
+        - switches
+    NVLinkSwitchState:
+      title: NVLinkSwitchState
+      type: object
+      description: >-
+        One NVLink switch. Management addresses and BMC details are deliberately absent: the
+        switches are not addressable through this API.
+      properties:
+        name:
+          type:
+            - string
+            - 'null'
+        trayIndex:
+          type:
+            - integer
+            - 'null'
+        slotNumber:
+          type:
+            - integer
+            - 'null'
+        isPrimary:
+          type:
+            - boolean
+            - 'null'
+          description: Whether this switch runs the primary fabric manager.
+        fabricManagerState:
+          type: string
+          enum:
+            - Ok
+            - NotOk
+            - Unknown
+          description: Unknown means the state could not be read, which is not the same as unhealthy.
+        fabricManagerReason:
+          type:
+            - string
+            - 'null'
+        fabricManagerError:
+          type:
+            - string
+            - 'null'
+        powerState:
+          type:
+            - string
+            - 'null'
+          description: '"on", "off" or "standby".'
+        healthStatus:
+          type:
+            - string
+            - 'null'
+          description: '"ok", "warning" or "critical".'
+      required:
+        - fabricManagerState
     RackIssues:
       type: object
       title: RackIssues
