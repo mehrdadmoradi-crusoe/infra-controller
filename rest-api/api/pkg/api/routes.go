@@ -593,6 +593,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewWithdrawMachineRepairRequestHandler(dbSession, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/machine/:id/port",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetMachinePortsHandler(dbSession, scp, cfg),
+		},
+		{
 			Path:    apiPathPrefix + "/machine/:id/event-log",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetMachineEventLogHandler(dbSession, scp, cfg),

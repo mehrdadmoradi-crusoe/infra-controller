@@ -9205,6 +9205,52 @@ paths:
         Reset BMC of a specific Machine.
 
         User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+  '/v2/org/{org}/nico/machine/{machineId}/port':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    get:
+      summary: Read the state of a Machine's uplinks
+      operationId: get-machine-ports
+      tags:
+        - Machine
+      description: |-
+        Link state, flap counts and the switch port each of the host's uplinks is cabled to.
+
+        The failure this answers is a link that is up now but has been flapping: a rising `carrierDownCount` shows that long before anyone connects it to a slow job.
+
+        **Read what this does not contain.** Everything here is observed from the host's side of the link. Port speed, negotiated duplex, FEC state and error or discard counters live on the switch, and the control plane has no read path to them, so they are absent rather than reported as zero. `switchSideAvailable` is `false` to say that plainly: a port that looks clean here has not been checked for errors at all.
+
+        `remotePort` names the switch port the uplink reaches, as the switch announced it over LLDP. It is a port name, not an address. `switchGroup` is a label on the same terms as in the Rack topology: uplinks sharing it reach the same switch, and it means nothing outside this response.
+
+        A host with no DPU has no uplink reporter, and answers with an empty list.
+
+        User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachinePorts'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/machine/{machineId}/event-log':
     parameters:
       - schema:
@@ -14662,6 +14708,81 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RackIssue'
+    MachinePorts:
+      title: MachinePorts
+      type: object
+      properties:
+        machineId:
+          type: string
+        observedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: >-
+            When the host last reported. An old timestamp means the state is stale rather than
+            wrong, which matters when a host has stopped reporting.
+        switchSideAvailable:
+          type: boolean
+          description: >-
+            Always false today. Says that nothing in this response was read from the switch: no
+            speed, no error counters, no FEC.
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachinePort'
+      required:
+        - machineId
+        - ports
+        - switchSideAvailable
+    MachinePort:
+      title: MachinePort
+      type: object
+      description: One of the host's uplinks, as the host sees it.
+      properties:
+        interfaceName:
+          type: string
+        linkType:
+          type:
+            - string
+            - 'null'
+        state:
+          type:
+            - string
+            - 'null'
+          description: The interface's administrative state from the host's side.
+        carrierUp:
+          type:
+            - boolean
+            - 'null'
+          description: Whether the host currently sees carrier.
+        mtu:
+          type:
+            - integer
+            - 'null'
+        carrierUpCount:
+          type:
+            - integer
+            - 'null'
+        carrierDownCount:
+          type:
+            - integer
+            - 'null'
+          description: How many times the host has seen the link go down. A flapping link shows here.
+        remotePort:
+          type:
+            - string
+            - 'null'
+          description: The switch port this uplink reaches, as announced over LLDP. A name, not an address.
+        switchGroup:
+          type:
+            - string
+            - 'null'
+          description: >-
+            A label, not an identifier. Uplinks sharing it reach the same switch; it means nothing
+            outside this response.
+      required:
+        - interfaceName
     MachineEventLog:
       title: MachineEventLog
       type: object
