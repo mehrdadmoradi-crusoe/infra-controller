@@ -144,6 +144,11 @@ func TestRackIssuesTreatsUnobservedHealthAsUnknownNotHealthy(t *testing.T) {
 	assert.Equal(t, 1, issues.Hosts)
 	assert.Equal(t, 0, issues.OpenCount)
 	assert.Empty(t, issues.Issues)
+	// The host contributed nothing because nothing was observed on it, and the
+	// response says so rather than letting an empty list read as a clean Rack.
+	assert.Equal(t, 1, issues.HostsWithoutHealth)
+	// The Rack itself was read; only the host's health was missing.
+	assert.True(t, issues.ComponentStateAvailable)
 }
 
 func TestRackIssuesStillReportsHostsWhenTheRackReadFails(t *testing.T) {
@@ -161,6 +166,10 @@ func TestRackIssuesStillReportsHostsWhenTheRackReadFails(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &issues))
 	require.Equal(t, 1, issues.OpenCount)
 	assert.Equal(t, "FabricWitnessMismatch", issues.Issues[0].ID)
+	// Host issues are still worth reporting, but the component state is not
+	// known, and a caller must be able to tell that from a Rack with no leaks.
+	assert.False(t, issues.ComponentStateAvailable)
+	assert.Equal(t, 0, issues.HostsWithoutHealth)
 }
 
 func TestRackIssuesIsReachableByTheTenantHoldingTheRack(t *testing.T) {

@@ -155,6 +155,9 @@ func TestNVLinkFabricReportsUnreadableStateAsUnknown(t *testing.T) {
 	require.Len(t, fabric.Switches, 1)
 	assert.Equal(t, model.NVLinkFabricManagerUnknown, fabric.Switches[0].FabricManagerState)
 	assert.Equal(t, 0, fabric.NotOkCount, "unknown is not a failure")
+	// But it is not health either, and the summary has to say so: notOkCount
+	// of zero on its own would read as a fabric that is fine.
+	assert.Equal(t, 1, fabric.UnknownCount)
 }
 
 // The management network is not exposed: a switch's BMC details must not reach
@@ -212,4 +215,110 @@ func TestNVLinkFabricHidesARackTheTenantDoesNotHold(t *testing.T) {
 	rec := f.getNVLinkFabric(t, f.tenantOrg, f.tenantUser, f.otherRackID, nil)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "Could not find Rack")
+}
+
+func TestBatchIDsSplitsOnTheLimitAndKeepsOrder(t *testing.T) {
+	ids := []string{"a", "b", "c", "d", "e"}
+
+	assert.Equal(t, [][]string{{"a", "b"}, {"c", "d"}, {"e"}}, batchIDs(ids, 2))
+	assert.Equal(t, [][]string{ids}, batchIDs(ids, 5))
+	assert.Equal(t, [][]string{ids}, batchIDs(ids, 99))
+	assert.Empty(t, batchIDs([]string{}, 2))
+
+	// A nonsensical size must not divide by zero or loop forever; one batch is
+	// the safe reading, and Core will say if it is too many.
+	assert.Equal(t, [][]string{ids}, batchIDs(ids, 0))
+	assert.Equal(t, [][]string{ids}, batchIDs(ids, -1))
+}
+
+// A Rack wider than Core's max_find_by_ids must still be readable. How many
+// switches a Rack holds is not the caller's choice and there is nothing for
+// them to page, so the handler asks in batches rather than letting Core refuse
+// the whole read.
+func TestNVLinkFabricAsksForSwitchesInBatches(t *testing.T) {
+	f := newRackAccessFixture(t)
+
+	const total = switchLookupBatchSize*2 + 3
+	ids := make([]string, 0, total)
+	for i := range total {
+		ids = append(ids, fmt.Sprintf("switch-%02d", i))
+	}
+
+	// Core answers each lookup with the switches that lookup asked for, so the
+	// assembled response shows whether every batch was sent and none repeated.
+	var asked [][]string
+	current := new(string)
+	var lastBatch []string
+
+	run := &tmocks.WorkflowRun{}
+	run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		out := args.Get(1).(*coreproxy.Response)
+		var response proto.Message
+		switch *current {
+		case cwssaws.Forge_FindSwitchIds_FullMethodName:
+			response = switchIDs(ids...)
+		case cwssaws.Forge_FindSwitchesByIds_FullMethodName:
+			list := &cwssaws.SwitchList{}
+			for _, id := range lastBatch {
+				list.Switches = append(list.Switches, &cwssaws.Switch{Id: &cwssaws.SwitchId{Id: id}})
+			}
+			response = list
+		default:
+			return
+		}
+		respJSON, err := protojson.Marshal(response)
+		require.NoError(t, err)
+		out.ResponseJSON = respJSON
+	}).Return(nil)
+
+	tsc := &tmocks.Client{}
+	tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, coreproxy.WorkflowName,
+		mock.MatchedBy(func(req coreproxy.Request) bool {
+			*current = req.FullMethod
+			if req.FullMethod == cwssaws.Forge_FindSwitchesByIds_FullMethodName {
+				var byIDs cwssaws.SwitchesByIdsRequest
+				require.NoError(t, protojson.Unmarshal(req.RequestJSON, &byIDs))
+				lastBatch = nil
+				for _, sid := range byIDs.GetSwitchIds() {
+					lastBatch = append(lastBatch, sid.GetId())
+				}
+				asked = append(asked, lastBatch)
+			}
+			return true
+		}),
+	).Return(run, nil)
+	f.scp.IDClientMap[f.siteID.String()] = tsc
+
+	q := url.Values{}
+	q.Set("siteId", f.siteID.String())
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/v2/org/%s/nico/rack/%s/nvlink-fabric?%s", f.org, f.heldRackID, q.Encode()), nil)
+	rec := httptest.NewRecorder()
+	ec := e.NewContext(req, rec)
+	ec.SetParamNames("orgName", "id")
+	ec.SetParamValues(f.org, f.heldRackID)
+	ec.Set("user", f.providerUser)
+
+	handler := NewGetNVLinkFabricHandler(f.dbSession, f.scp, common.GetTestConfig())
+	require.NoError(t, handler.Handle(ec))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Three lookups: two full batches and the remainder, none over the limit.
+	require.Len(t, asked, 3)
+	for _, batch := range asked {
+		assert.LessOrEqual(t, len(batch), switchLookupBatchSize)
+	}
+
+	// And every switch came back exactly once, in order.
+	var flat []string
+	for _, batch := range asked {
+		flat = append(flat, batch...)
+	}
+	assert.Equal(t, ids, flat)
+
+	var fabric model.APINVLinkFabric
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &fabric))
+	assert.Equal(t, total, fabric.SwitchCount)
+	assert.Len(t, fabric.Switches, total)
 }

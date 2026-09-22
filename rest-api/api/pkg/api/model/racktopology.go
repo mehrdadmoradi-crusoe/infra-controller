@@ -46,6 +46,11 @@ type APIRackTopology struct {
 	// bottom up.
 	Hosts     []APIRackTopologyHost `json:"hosts"`
 	HostCount int                   `json:"hostCount"`
+	// HostsNotReported is how many hosts the rack's expected build places in it
+	// that the Site returned no placement record for at all. The Site omits a
+	// host it holds no management interface for, so without this a rack that is
+	// half discovered would read as a smaller rack that is fully discovered.
+	HostsNotReported int `json:"hostsNotReported"`
 	// SwitchGroupCount and PowerGroupCount are how many distinct switches and
 	// shelves the rack's hosts are spread across, which answers "is this one
 	// failure domain or several" without walking the list.
@@ -55,11 +60,18 @@ type APIRackTopology struct {
 
 // NewAPIRackTopology converts the Site's placement records for one rack.
 //
-// A host whose placement the control plane has not recorded is still listed,
-// with its placement absent. Leaving it out would make a partially discovered
+// A host the Site returned with no placement is still listed, with its
+// placement absent, because leaving it out would make a partially discovered
 // rack look smaller than it is, which is the opposite of what an acceptance
 // needs.
-func NewAPIRackTopology(rackID string, positions []*cwssaws.MachinePositionInfo) APIRackTopology {
+//
+// The Site can also omit a host entirely: it reports placement by management
+// address, so a host it holds no management interface for does not come back at
+// all. Those cannot be listed, so expectedHosts -- how many the rack's expected
+// build places in it -- is taken as well, and the difference is reported. A
+// caller comparing hostCount against the rack's design would otherwise read a
+// half-discovered rack as a complete smaller one.
+func NewAPIRackTopology(rackID string, positions []*cwssaws.MachinePositionInfo, expectedHosts int) APIRackTopology {
 	out := APIRackTopology{
 		RackID: rackID,
 		Hosts:  make([]APIRackTopologyHost, 0, len(positions)),
@@ -97,6 +109,9 @@ func NewAPIRackTopology(rackID string, positions []*cwssaws.MachinePositionInfo)
 	}
 
 	out.HostCount = len(out.Hosts)
+	if missing := expectedHosts - out.HostCount; missing > 0 {
+		out.HostsNotReported = missing
+	}
 	out.SwitchGroupCount = switchLabels.count()
 	out.PowerGroupCount = powerLabels.count()
 	return out

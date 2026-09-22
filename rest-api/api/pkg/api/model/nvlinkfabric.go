@@ -52,6 +52,12 @@ type APINVLinkFabric struct {
 	// list.
 	SwitchCount int `json:"switchCount"`
 	NotOkCount  int `json:"notOkCount"`
+	// UnknownCount is how many switches reported no readable fabric manager
+	// state. They are not counted as NotOk, because they are not known to be
+	// faulty; they are counted here, because a notOkCount of zero alongside
+	// several unknowns is not a healthy fabric, and reading the summary alone
+	// should not suggest it is.
+	UnknownCount int `json:"unknownCount"`
 }
 
 // NVLink fabric manager states, as this API names them.
@@ -99,8 +105,11 @@ func NewAPINVLinkFabric(rackID string, switches []*cwssaws.Switch) APINVLinkFabr
 		isPrimary := sw.GetIsPrimary()
 		state.IsPrimary = &isPrimary
 
-		if state.FabricManagerState == NVLinkFabricManagerNotOk {
+		switch state.FabricManagerState {
+		case NVLinkFabricManagerNotOk:
 			out.NotOkCount++
+		case NVLinkFabricManagerUnknown:
+			out.UnknownCount++
 		}
 		out.Switches = append(out.Switches, state)
 	}

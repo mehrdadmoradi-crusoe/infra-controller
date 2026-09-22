@@ -14584,6 +14584,12 @@ components:
           type: string
         hostCount:
           type: integer
+        hostsNotReported:
+          type: integer
+          description: >-
+            How many hosts the Rack's expected build places in it that the Site returned no
+            placement record for at all. The Site omits a host it holds no management interface
+            for, so without this a half-discovered Rack would read as a complete smaller one.
         switchGroupCount:
           type: integer
           description: How many distinct switches the Rack's hosts are spread across.
@@ -14597,6 +14603,7 @@ components:
       required:
         - rackId
         - hostCount
+        - hostsNotReported
         - switchGroupCount
         - powerGroupCount
         - hosts
@@ -14642,6 +14649,12 @@ components:
         notOkCount:
           type: integer
           description: How many report a fabric manager that is not Ok. Unknown does not count.
+        unknownCount:
+          type: integer
+          description: >-
+            How many reported no readable fabric manager state. They are not counted as not Ok,
+            because they are not known to be faulty, but a notOkCount of zero alongside several
+            unknowns is not a healthy fabric.
         switches:
           type: array
           items:
@@ -14650,6 +14663,7 @@ components:
         - rackId
         - switchCount
         - notOkCount
+        - unknownCount
         - switches
     NVLinkSwitchState:
       title: NVLinkSwitchState
@@ -14716,10 +14730,31 @@ components:
         hosts:
           type: integer
           description: Number of hosts the Rack's expected build places in it
+        hostsWithoutHealth:
+          type: integer
+          description: >-
+            How many of those hosts have no health recorded. They contribute no issues, so without
+            this an empty list would read as a clean Rack rather than an unobserved one.
+        componentStateAvailable:
+          type: boolean
+          description: >-
+            Whether the Rack's own components, today the leak detectors, were read. When false no
+            component issue could have been reported whatever the Rack is doing, so an empty list
+            says nothing about them.
         issues:
           type: array
           items:
             $ref: '#/components/schemas/RackIssue'
+      # componentStateAvailable exists to distinguish "nothing is wrong" from
+      # "nobody looked", so a client has to be able to rely on it being there:
+      # an absent field would leave exactly the ambiguity it removes.
+      required:
+        - rackId
+        - openCount
+        - hosts
+        - hostsWithoutHealth
+        - componentStateAvailable
+        - issues
     MachinePorts:
       title: MachinePorts
       type: object

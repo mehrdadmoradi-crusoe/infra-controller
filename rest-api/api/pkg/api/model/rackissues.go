@@ -46,8 +46,17 @@ type APIRackIssues struct {
 	OpenCount int `json:"openCount"`
 	// Hosts is the number of hosts the Rack's expected build places in it, for
 	// context on how much of the Rack the issues cover.
-	Hosts  int            `json:"hosts"`
-	Issues []APIRackIssue `json:"issues"`
+	Hosts int `json:"hosts"`
+	// HostsWithoutHealth is how many of those hosts have no health recorded, or
+	// none this API could read. They contribute no issues, so without this an
+	// empty list would read as a clean Rack rather than an unobserved one.
+	HostsWithoutHealth int `json:"hostsWithoutHealth"`
+	// ComponentStateAvailable says whether the Rack's own components, today the
+	// leak detectors, were read. When false, no component issue could have been
+	// reported whatever the Rack is doing, so an empty list says nothing about
+	// them. "Nothing is wrong" and "nobody looked" must not read the same.
+	ComponentStateAvailable bool           `json:"componentStateAvailable"`
+	Issues                  []APIRackIssue `json:"issues"`
 }
 
 // rackComponentIssueSource is the source reported for an issue that comes from
@@ -62,9 +71,16 @@ const LeakDetectedAlertID = "LeakDetected"
 //
 // Machines are expected to carry their cached health report; a host with no
 // health recorded contributes nothing rather than an absence of alerts, since
-// "not yet observed" is not the same as "healthy".
-func NewAPIRackIssues(rackID string, machines []cdbm.Machine, components []*flowv1.Component) APIRackIssues {
+// "not yet observed" is not the same as "healthy". How many such hosts there
+// were is reported, so the caller can tell a quiet Rack from an unobserved one.
+//
+// componentsRead says whether the Rack's component state was actually read.
+// It is carried through rather than inferred from len(components), because a
+// Rack genuinely without leak detectors and a Rack whose Site could not be
+// asked both arrive here as an empty slice.
+func NewAPIRackIssues(rackID string, machines []cdbm.Machine, components []*flowv1.Component, componentsRead bool) APIRackIssues {
 	issues := make([]APIRackIssue, 0)
+	withoutHealth := 0
 
 	for i := range machines {
 		machine := machines[i]
@@ -73,6 +89,7 @@ func NewAPIRackIssues(rackID string, machines []cdbm.Machine, components []*flow
 			// Unreadable or absent health contributes nothing: "not yet
 			// observed" is not the same as "healthy", and inventing an empty
 			// alert list would say the wrong thing.
+			withoutHealth++
 			continue
 		}
 		for _, alert := range health.Alerts {
@@ -112,10 +129,12 @@ func NewAPIRackIssues(rackID string, machines []cdbm.Machine, components []*flow
 	})
 
 	return APIRackIssues{
-		RackID:    rackID,
-		OpenCount: len(issues),
-		Hosts:     len(machines),
-		Issues:    issues,
+		RackID:                  rackID,
+		OpenCount:               len(issues),
+		Hosts:                   len(machines),
+		HostsWithoutHealth:      withoutHealth,
+		ComponentStateAvailable: componentsRead,
+		Issues:                  issues,
 	}
 }
 

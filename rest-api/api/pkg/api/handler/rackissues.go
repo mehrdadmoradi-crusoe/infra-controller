@@ -117,9 +117,9 @@ func (h GetRackIssuesHandler) Handle(c echo.Context) error {
 	// Component state comes from the Site. A Rack read that fails should not
 	// hide the host issues we already have, so the components are best effort
 	// and their absence is logged rather than returned.
-	components := h.rackComponents(ctx, logger, site, rackStrID)
+	components, componentsRead := h.rackComponents(ctx, logger, site, rackStrID)
 
-	return c.JSON(http.StatusOK, model.NewAPIRackIssues(rackStrID, machines, components))
+	return c.JSON(http.StatusOK, model.NewAPIRackIssues(rackStrID, machines, components, componentsRead))
 }
 
 // machinesInRack returns the Machines the Site's expected build places in the
@@ -159,13 +159,17 @@ func machinesInRack(ctx context.Context, logger zerolog.Logger, dbSession *cdb.S
 }
 
 // rackComponents reads the Rack's components from the Site so their own state,
-// today the leak detectors, can be reported alongside host health. A failure
-// returns no components rather than failing the whole read.
-func (h GetRackIssuesHandler) rackComponents(ctx context.Context, logger zerolog.Logger, site *cdbm.Site, rackID string) []*flowv1.Component {
+// today the leak detectors, can be reported alongside host health.
+//
+// A failure returns no components rather than failing the whole read, because
+// host issues are worth reporting on their own. The second return says whether
+// the read succeeded, so that the response can distinguish a Rack with nothing
+// wrong from one whose components nobody could ask about.
+func (h GetRackIssuesHandler) rackComponents(ctx context.Context, logger zerolog.Logger, site *cdbm.Site, rackID string) ([]*flowv1.Component, bool) {
 	stc, err := h.scp.GetClientByID(site.ID)
 	if err != nil {
 		logger.Warn().Err(err).Msg("no workflow client for Site; reporting host issues only")
-		return nil
+		return nil, false
 	}
 
 	workflowID := fmt.Sprintf("rack-issues-%s", rackID)
@@ -186,7 +190,7 @@ func (h GetRackIssuesHandler) rackComponents(ctx context.Context, logger zerolog
 	})
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to schedule GetRack for component state; reporting host issues only")
-		return nil
+		return nil, false
 	}
 
 	var flowResponse flowv1.GetRackInfoResponse
@@ -194,11 +198,11 @@ func (h GetRackIssuesHandler) rackComponents(ctx context.Context, logger zerolog
 		var timeoutErr *tp.TimeoutError
 		if errors.As(err, &timeoutErr) {
 			logger.Warn().Err(err).Msg("GetRack timed out reading component state; reporting host issues only")
-			return nil
+			return nil, false
 		}
 		logger.Warn().Err(err).Msg("failed to read component state; reporting host issues only")
-		return nil
+		return nil, false
 	}
 
-	return flowResponse.GetRack().GetComponents()
+	return flowResponse.GetRack().GetComponents(), true
 }

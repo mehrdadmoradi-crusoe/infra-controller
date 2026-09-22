@@ -176,6 +176,28 @@ func TestRackTopologyListsHostsWithNoRecordedPlacement(t *testing.T) {
 	assert.Nil(t, topology.Hosts[0].SlotNumber)
 	assert.Nil(t, topology.Hosts[0].SwitchGroup)
 	assert.Equal(t, 0, topology.SwitchGroupCount)
+	// The Site did report this host, just without a placement, so nothing is
+	// missing from the read.
+	assert.Equal(t, 0, topology.HostsNotReported)
+}
+
+// The Site reports placement by management address and omits a host it holds no
+// management interface for. Such a host cannot be listed, so the count of them
+// is what tells a caller the rack is only partly discovered -- otherwise a
+// half-discovered rack reads as a complete smaller one.
+func TestRackTopologyCountsHostsTheSiteDidNotReport(t *testing.T) {
+	f := newRackAccessFixture(t)
+	machineInHeldRack(t, f)
+
+	rec := f.getRackTopology(t, f.org, f.providerUser, f.heldRackID,
+		&cwssaws.MachinePositionInfoList{})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var topology model.APIRackTopology
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &topology))
+	assert.Empty(t, topology.Hosts)
+	assert.Equal(t, 0, topology.HostCount)
+	assert.Equal(t, 1, topology.HostsNotReported)
 }
 
 func TestRackTopologyIsReachableByTheTenantHoldingTheRack(t *testing.T) {

@@ -22,6 +22,32 @@ import (
 
 // ~~~~~ NVLink Fabric Handler ~~~~~ //
 
+// switchLookupBatchSize is how many switch IDs are sent to Core in one lookup.
+//
+// Core rejects a lookup carrying more IDs than its own max_find_by_ids, which
+// is a deployment setting: it defaults to 100 but is configured lower in
+// practice, and this API cannot read it. 25 is comfortably below any value
+// seen, and small enough that it stays below a lower one.
+const switchLookupBatchSize = 25
+
+// batchIDs splits ids into runs of at most size, so a caller can respect a
+// server-side limit on how many identifiers one request may carry. The batches
+// alias the input rather than copying it.
+func batchIDs[T any](ids []T, size int) [][]T {
+	if size < 1 {
+		return [][]T{ids}
+	}
+	batches := make([][]T, 0, (len(ids)+size-1)/size)
+	for start := 0; start < len(ids); start += size {
+		end := start + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batches = append(batches, ids[start:end])
+	}
+	return batches
+}
+
 // GetNVLinkFabricHandler reports the fabric manager state across a Rack's
 // NVLink switches.
 //
@@ -121,18 +147,26 @@ func (h GetNVLinkFabricHandler) Handle(c echo.Context) error {
 		return c.JSON(http.StatusOK, model.NewAPINVLinkFabric(rackStrID, nil))
 	}
 
-	switchResp := &cwssaws.SwitchList{}
-	if apiErr := common.ExecuteCoreGRPC(ctx, stc, cwssaws.Forge_FindSwitchesByIds_FullMethodName,
-		&cwssaws.SwitchesByIdsRequest{SwitchIds: idResp.GetIds()},
-		switchResp, site.ID.String()); apiErr != nil {
-		logAPIError(logger, apiErr, "Failed to read the Rack's switches via Core gRPC proxy")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	// Core refuses a lookup carrying more IDs than its own max_find_by_ids, so
+	// ask in batches. How many switches a Rack holds is not the caller's
+	// choice and there is nothing for them to page, so a Rack wider than that
+	// setting must not turn into a rejected read.
+	switches := make([]*cwssaws.Switch, 0, len(idResp.GetIds()))
+	for _, batch := range batchIDs(idResp.GetIds(), switchLookupBatchSize) {
+		switchResp := &cwssaws.SwitchList{}
+		if apiErr := common.ExecuteCoreGRPC(ctx, stc, cwssaws.Forge_FindSwitchesByIds_FullMethodName,
+			&cwssaws.SwitchesByIdsRequest{SwitchIds: batch},
+			switchResp, site.ID.String()); apiErr != nil {
+			logAPIError(logger, apiErr, "Failed to read the Rack's switches via Core gRPC proxy")
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		switches = append(switches, switchResp.GetSwitches()...)
 	}
 
 	logger.Info().
 		Str("rack_id", rackStrID).Str("site_id", site.ID.String()).
-		Int("switches", len(switchResp.GetSwitches())).
+		Int("switches", len(switches)).
 		Msg("Read NVLink fabric manager state for Rack")
 
-	return c.JSON(http.StatusOK, model.NewAPINVLinkFabric(rackStrID, switchResp.GetSwitches()))
+	return c.JSON(http.StatusOK, model.NewAPINVLinkFabric(rackStrID, switches))
 }

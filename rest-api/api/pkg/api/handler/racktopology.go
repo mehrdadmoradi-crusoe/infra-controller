@@ -106,7 +106,7 @@ func (h GetRackTopologyHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 	if len(machines) == 0 {
-		return c.JSON(http.StatusOK, model.NewAPIRackTopology(rackStrID, nil))
+		return c.JSON(http.StatusOK, model.NewAPIRackTopology(rackStrID, nil, 0))
 	}
 
 	machineIDs := make([]*cwssaws.MachineId, 0, len(machines))
@@ -127,11 +127,12 @@ func (h GetRackTopologyHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
-	topology := model.NewAPIRackTopology(rackStrID, coreResp.GetMachinePositionInfo())
+	topology := model.NewAPIRackTopology(rackStrID, coreResp.GetMachinePositionInfo(), len(machines))
 
 	logger.Info().
 		Str("rack_id", rackStrID).Str("site_id", site.ID.String()).
-		Int("hosts", topology.HostCount).Int("switch_groups", topology.SwitchGroupCount).
+		Int("hosts", topology.HostCount).Int("hosts_not_reported", topology.HostsNotReported).
+		Int("switch_groups", topology.SwitchGroupCount).
 		Msg("Read Rack topology")
 
 	return c.JSON(http.StatusOK, topology)
