@@ -9352,6 +9352,8 @@ paths:
 
         `parameters` is passed to the controller exactly as submitted, so that what an approver reads is what the controller receives.
 
+        A change is only recorded if it can be attributed. The requester, the approvers and the applier are taken from the identity the caller presents, and a deployment that cannot supply one answers `501` to this call, to approve and to apply; listing and cancelling are unaffected. A change nobody can be named for is refused rather than applied anonymously, since the record of who asked and who agreed is the reason this endpoint exists.
+
         User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix for a Machine of the org's Infrastructure Provider, or `TENANT_ADMIN` suffix for a Machine the org's Tenant holds an Instance on (or, for a Tenant with targeted Instance creation, any Machine of an Infrastructure Provider it has an account with). A Machine outside the caller's reach is reported as not found.
       requestBody:
         required: true
@@ -9386,6 +9388,8 @@ paths:
                 $ref: '#/components/schemas/NICoAPIError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
+        '501':
+          $ref: '#/components/responses/UnattributableChangeError'
     get:
       summary: List BIOS and BMC changes on a Machine
       operationId: list-machine-redfish-actions
@@ -9442,6 +9446,8 @@ paths:
         Agree to a change someone else requested. Approving does not apply it.
 
         This requires a `PROVIDER_ADMIN` role: an approval given by the party that asked for the change would not be an approval. A Tenant calling it is refused even for a Machine it holds.
+
+        An approval that cannot be attributed to a named approver is refused with `501`, for the same reason the request itself would be.
       responses:
         '202':
           description: The approval was recorded
@@ -9457,6 +9463,8 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
+        '501':
+          $ref: '#/components/responses/UnattributableChangeError'
   '/v2/org/{org}/nico/machine/{machineId}/redfish-action/{requestId}/apply':
     parameters:
       - schema:
@@ -9485,6 +9493,8 @@ paths:
         - Machine
       description: |-
         Carry out a change that has been approved. Requires a `PROVIDER_ADMIN` role.
+
+        An apply below the required number of approvals is refused with `400`, and an apply that cannot be attributed to a named applier is refused with `501`.
       responses:
         '202':
           description: The change was accepted for application
@@ -9500,6 +9510,8 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
+        '501':
+          $ref: '#/components/responses/UnattributableChangeError'
   '/v2/org/{org}/nico/machine/{machineId}/redfish-action/{requestId}':
     parameters:
       - schema:
@@ -26209,6 +26221,21 @@ components:
         curl -v -X GET -H "Content-Type: application/json" -H "Authorization: Bearer $JWT_BEARER_TOKEN" https://nico-rest-api.nico.svc.cluster.local/v2/org/$ORG_NAME/nico/user/current
         ```
   responses:
+    UnattributableChangeError:
+      description: |-
+        Error response when a change cannot be attributed to the calling user, and so is refused rather than applied anonymously.
+
+        The requester, approvers and applier of a BIOS or BMC change are taken from the identity the caller presents to the controller plane. Where a deployment cannot supply one, this step is unavailable and says so; retrying will not change it. Listing and cancelling are unaffected.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NICoAPIError'
+          examples:
+            example-1:
+              value:
+                source: nico
+                message: Approval-gated Redfish changes are unavailable through this API
+                data: null
     GenericHttpError:
       description: Response when the API handler encounters an unexpected error
       content:

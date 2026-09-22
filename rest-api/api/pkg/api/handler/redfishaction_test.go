@@ -340,3 +340,51 @@ func TestRedfishActionRejectsAnUnparsableRequestID(t *testing.T) {
 	}
 	assert.Empty(t, *f.calls)
 }
+
+// Core refuses to record a change it cannot attribute to a user, and it says
+// so with a message this API has to recognise, because the gRPC code it
+// arrives under is not distinguishable from any other internal failure. A bare
+// 500 would read as a fault that might clear on retry. This one never does, so
+// it is reported as not implemented, and the message says what is missing.
+//
+// The string matched here is Core's own: the Rust
+// CarbideError::ClientCertificateMissingInformation formats as
+// "Client certificate presented has missing information: {what}." If that
+// wording changes upstream this test keeps the stale copy and so fails, which
+// is the intent.
+func TestUnattributableChangeIsReportedAsNotImplemented(t *testing.T) {
+	for _, what := range []string{"external user info", "external user name"} {
+		coreErr := cutil.NewAPIError(http.StatusInternalServerError,
+			"Client certificate presented has missing information: "+what+". (type: Error, retryable: true)", nil)
+
+		got := asUnattributable(coreErr)
+
+		require.NotNil(t, got)
+		assert.Equal(t, http.StatusNotImplemented, got.Code, what)
+		// Core's own wording is not passed through: it names a retryable error
+		// and a certificate the caller never presented and could not supply.
+		assert.Equal(t, redfishActionUnattributable, got.Message)
+		assert.NotContains(t, got.Message, "retryable")
+	}
+}
+
+// Every other failure keeps the status Core gave it, so a genuine 404 or a
+// timeout is not disguised as an unimplemented feature.
+func TestUnattributableLeavesOtherFailuresAlone(t *testing.T) {
+	assert.Nil(t, asUnattributable(nil))
+
+	for _, tc := range []struct {
+		code int
+		msg  string
+	}{
+		{http.StatusNotFound, "Could not find Redfish action with specified ID"},
+		{http.StatusGatewayTimeout, "Core proxy request timed out"},
+		{http.StatusInternalServerError, "some other internal failure"},
+		{http.StatusBadRequest, "insufficient approvals"},
+	} {
+		got := asUnattributable(cutil.NewAPIError(tc.code, tc.msg, nil))
+		require.NotNil(t, got)
+		assert.Equal(t, tc.code, got.Code, tc.msg)
+		assert.Equal(t, tc.msg, got.Message)
+	}
+}

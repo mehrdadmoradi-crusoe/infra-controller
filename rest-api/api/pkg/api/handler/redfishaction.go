@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
@@ -39,6 +40,36 @@ import (
 // exist on the addressed Machine, so that action IDs from other Machines are
 // not confirmed to exist.
 const redfishActionNotFoundMessage = "Could not find Redfish action with specified ID"
+
+// Core takes the requester, the approver and the applier from the subject of
+// the TLS client certificate the caller presents to it, and rejects the call
+// outright when that certificate carries no user. The Site proxy this API
+// reaches Core through presents the Site's own service certificate and carries
+// no field for an end user, so these three steps cannot be attributed and Core
+// refuses them. Recording, listing and cancelling are unaffected.
+//
+// Closing this needs an actor carried from here, through the proxy request, to
+// a Core that will accept a Site's assertion of who asked. That is a decision
+// about how much a Site is trusted to speak for its users, so it is not
+// something to work around here: a request that cannot be attributed must fail
+// rather than be applied anonymously, which is the whole point of the
+// four-eyes record.
+const (
+	coreMissingCertUserFragment = "Client certificate presented has missing information"
+	redfishActionUnattributable = "Approval-gated Redfish changes are unavailable through this API: " +
+		"the Core records the requester and approvers from a client certificate, and requests " +
+		"proxied via the Site do not carry the calling user's identity"
+)
+
+// asUnattributable reports the Core's refusal to attribute a change as what it
+// is. Without this the caller sees a bare 500, which reads as a fault that
+// might clear on retry; this one never will.
+func asUnattributable(apiErr *cutil.APIError) *cutil.APIError {
+	if apiErr == nil || !strings.Contains(apiErr.Message, coreMissingCertUserFragment) {
+		return apiErr
+	}
+	return cutil.NewAPIError(http.StatusNotImplemented, redfishActionUnattributable, nil)
+}
 
 // RedfishActionHandler serves the whole action lifecycle. Which operation runs
 // is decided by the route, so the reach check and the address resolution are
@@ -102,7 +133,8 @@ func newRedfishActionHandler(dbSession *cdb.Session, scp *sc.ClientPool, op redf
 
 // Handle godoc
 // @Summary Request, approve and apply a BIOS or BMC change
-// @Description Changes to a Machine's BIOS or BMC are requested through the audited proxy and applied only after approval. Requesting and listing are open to the Tenant holding the Machine and to the Provider; approving and applying require a Provider role, so that the approver is never the requester.
+// @Description Changes to a Machine's BIOS or BMC are requested through the audited proxy and applied only after approval. Requesting and listing are open to the Tenant holding the Machine and to the Provider; approving and applying require a Provider role, so that the approver is never the requester. Requesting, approving and applying answer 501 where the deployment cannot attribute the change to the calling user: the Core records requester and approvers from a client certificate, and a request proxied via the Site does not carry one. Listing and cancelling are unaffected.
+// @Failure 501 {object} util.APIError "The deployment cannot attribute the change to the calling user"
 // @Tags machine
 // @Accept json
 // @Produce json
@@ -199,6 +231,7 @@ func (h RedfishActionHandler) create(c echo.Context, ctx context.Context, logger
 	if apiErr := common.ExecuteCoreGRPC(ctx, stc, cwssaws.Forge_RedfishCreateAction_FullMethodName,
 		apiReq.ToProto(bmcIPs), coreResp, site.ID.String()); apiErr != nil {
 		logAPIError(logger, apiErr, "Failed to request a BIOS or BMC change via Core gRPC proxy")
+		apiErr = asUnattributable(apiErr)
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
@@ -260,6 +293,7 @@ func (h RedfishActionHandler) byID(c echo.Context, ctx context.Context, logger z
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, redfishActionNotFoundMessage, nil)
 		}
 		logAPIError(logger, apiErr, fmt.Sprintf("Failed to %s via Core gRPC proxy", message))
+		apiErr = asUnattributable(apiErr)
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
