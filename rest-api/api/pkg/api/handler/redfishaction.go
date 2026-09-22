@@ -19,6 +19,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/coreproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -65,10 +66,41 @@ const (
 // is. Without this the caller sees a bare 500, which reads as a fault that
 // might clear on retry; this one never will.
 func asUnattributable(apiErr *cutil.APIError) *cutil.APIError {
-	if apiErr == nil || !strings.Contains(apiErr.Message, coreMissingCertUserFragment) {
+	if apiErr == nil {
+		return nil
+	}
+	// Either party can be the one unable to name the caller: the Core, when it
+	// is handed a certificate with no user in it, or the site, when it holds no
+	// CA to mint one from. The caller's situation is the same in both cases.
+	if !strings.Contains(apiErr.Message, coreMissingCertUserFragment) &&
+		!strings.Contains(apiErr.Message, coreproxy.ActorUnsupportedMessage) {
 		return apiErr
 	}
 	return cutil.NewAPIError(http.StatusNotImplemented, redfishActionUnattributable, nil)
+}
+
+// redfishActor names the caller for the Core's record of a change.
+//
+// Core compares approvers by this string to refuse a second approval from the
+// same person, so it has to be stable for one person and distinct between two.
+// The email is preferred as the name a human recognises in an audit trail; the
+// Starfleet ID is the fallback for a principal with none, and the row ID is
+// last, since it is always present and unique even if it means nothing to a
+// reader. The group is the role the caller acted in, which is what the record
+// needs alongside the name.
+func redfishActor(dbUser *cdbm.User, org string, isProvider bool) *coreproxy.Actor {
+	user := dbUser.ID.String()
+	switch {
+	case dbUser.Email != nil && *dbUser.Email != "":
+		user = *dbUser.Email
+	case dbUser.StarfleetID != nil && *dbUser.StarfleetID != "":
+		user = *dbUser.StarfleetID
+	}
+	group := auth.TenantAdminRole
+	if isProvider {
+		group = auth.ProviderAdminRole
+	}
+	return &coreproxy.Actor{User: user, Org: org, Group: group}
 }
 
 // RedfishActionHandler serves the whole action lifecycle. Which operation runs
@@ -196,19 +228,23 @@ func (h RedfishActionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve workflow client for Site", nil)
 	}
 
+	// Listing is the site's own read. Everything else changes the record of
+	// who asked or agreed, and is made as the caller.
+	actor := redfishActor(dbUser, org, isProvider)
+
 	switch h.op {
 	case redfishActionCreate:
-		return h.create(c, ctx, logger, stc, machine, site)
+		return h.create(c, ctx, logger, stc, machine, site, actor)
 	case redfishActionList:
 		return h.list(c, ctx, logger, stc, machine, site)
 	default:
-		return h.byID(c, ctx, logger, stc, site)
+		return h.byID(c, ctx, logger, stc, site, actor)
 	}
 }
 
 // create records a requested change against the Machine's management
 // addresses. It does not apply anything.
-func (h RedfishActionHandler) create(c echo.Context, ctx context.Context, logger zerolog.Logger, stc tClient.Client, machine *cdbm.Machine, site *cdbm.Site) error {
+func (h RedfishActionHandler) create(c echo.Context, ctx context.Context, logger zerolog.Logger, stc tClient.Client, machine *cdbm.Machine, site *cdbm.Site, actor *coreproxy.Actor) error {
 	var apiReq model.APIRedfishActionRequest
 	if err := c.Bind(&apiReq); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
@@ -225,10 +261,11 @@ func (h RedfishActionHandler) create(c echo.Context, ctx context.Context, logger
 	logger.Info().
 		Str("machine_id", machine.ID).Str("site_id", site.ID.String()).
 		Str("action", apiReq.Action).Str("target", apiReq.Target).
+		Str("actor", actor.User).
 		Msg("Requesting a BIOS or BMC change via Core gRPC proxy")
 
 	coreResp := &cwssaws.RedfishCreateActionResponse{}
-	if apiErr := common.ExecuteCoreGRPC(ctx, stc, cwssaws.Forge_RedfishCreateAction_FullMethodName,
+	if apiErr := common.ExecuteCoreGRPCAs(ctx, stc, actor, cwssaws.Forge_RedfishCreateAction_FullMethodName,
 		apiReq.ToProto(bmcIPs), coreResp, site.ID.String()); apiErr != nil {
 		logAPIError(logger, apiErr, "Failed to request a BIOS or BMC change via Core gRPC proxy")
 		apiErr = asUnattributable(apiErr)
@@ -272,7 +309,7 @@ func (h RedfishActionHandler) list(c echo.Context, ctx context.Context, logger z
 // Machine in the path is what the reach check ran against and is not sent on.
 // That is deliberate: it means a caller can only act on an action it reached a
 // Machine for.
-func (h RedfishActionHandler) byID(c echo.Context, ctx context.Context, logger zerolog.Logger, stc tClient.Client, site *cdbm.Site) error {
+func (h RedfishActionHandler) byID(c echo.Context, ctx context.Context, logger zerolog.Logger, stc tClient.Client, site *cdbm.Site, actor *coreproxy.Actor) error {
 	raw := c.Param("requestId")
 	requestID, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || requestID <= 0 {
@@ -282,10 +319,10 @@ func (h RedfishActionHandler) byID(c echo.Context, ctx context.Context, logger z
 	method, message := h.op.coreMethod()
 
 	logger.Info().
-		Int64("request_id", requestID).Str("site_id", site.ID.String()).
+		Int64("request_id", requestID).Str("site_id", site.ID.String()).Str("actor", actor.User).
 		Msgf("%s via Core gRPC proxy", message)
 
-	if apiErr := common.ExecuteCoreGRPC(ctx, stc, method,
+	if apiErr := common.ExecuteCoreGRPCAs(ctx, stc, actor, method,
 		&cwssaws.RedfishActionID{RequestId: requestID}, nil, site.ID.String()); apiErr != nil {
 		// Core reports an unknown action as not found; keep that, so a caller
 		// cannot use this endpoint to discover which action IDs exist.

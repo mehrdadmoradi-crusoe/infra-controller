@@ -36,6 +36,14 @@ const WorkflowName = "InvokeCoreGRPC"
 // the Temporal-visible request JSON.
 const RedactedPlaceholder = "[REDACTED]"
 
+// ActorUnsupportedMessage is the error a site returns when a request names an
+// Actor but the site holds no CA to mint an actor certificate from. It is a
+// shared constant because the REST tier recognises it: the caller then sees
+// the same answer as when the Core itself refuses to attribute a change --
+// unavailable here, and retrying will not change that -- rather than a bare
+// internal error.
+const ActorUnsupportedMessage = "site cannot attribute the call to a user: no actor CA is configured"
+
 // Request is the generic proxy workflow/activity input.
 type Request struct {
 	// FullMethod is the gRPC method, either fully qualified
@@ -52,6 +60,31 @@ type Request struct {
 	// history; the site decrypts it with the shared site key and merges the
 	// values back into RequestJSON before invoking Core.
 	EncryptedSecrets []byte `json:"encryptedSecrets,omitempty"`
+
+	// Actor is the human on whose behalf the call is made, for the few Core
+	// methods that record one. Core takes the requester and approvers of a
+	// Redfish action from the subject of the client certificate presented to
+	// it, so when Actor is set the site does not use its own service
+	// certificate: it mints a short-lived leaf naming this actor from a CA the
+	// Core trusts for exactly that, and presents that instead. Nil means the
+	// call is the site's own, which is every other method.
+	//
+	// This is deliberately visible in Temporal history. Who asked for a BIOS
+	// change is not a secret; it is the audit record.
+	Actor *Actor `json:"actor,omitempty"`
+}
+
+// Actor names the human behind a proxied Core call. The fields map onto the
+// certificate subject the Core reads: User to CN, Org to O, Group to OU.
+type Actor struct {
+	// User is the identity Core records as requester, approver or applier.
+	// It must be non-empty and stable for the same person, because Core
+	// refuses a second approval from the same user by comparing it.
+	User string `json:"user"`
+	// Org is the caller's org, informational to Core.
+	Org string `json:"org,omitempty"`
+	// Group is the caller's role within the org, informational to Core.
+	Group string `json:"group,omitempty"`
 }
 
 // Response is the generic proxy workflow/activity output.

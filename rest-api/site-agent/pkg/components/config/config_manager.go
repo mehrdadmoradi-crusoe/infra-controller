@@ -103,11 +103,24 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 		conf.CoreGrpc.ClientKeyPath = DefaultCoreGrpcClientKeyPath
 	}
 
+	// The actor CA is optional and has no default. A site without one simply
+	// cannot attribute calls, and says so, rather than presenting its own
+	// certificate for a call the Core would then record as nobody.
+	flag.StringVar(&conf.CoreGrpc.ActorCACertPath, "coreGrpcActorCACertPath",
+		os.Getenv("CORE_GRPC_ACTOR_CA_CERT_PATH"), "Core gRPC actor CA cert path (optional)")
+	flag.StringVar(&conf.CoreGrpc.ActorCAKeyPath, "coreGrpcActorCAKeyPath",
+		os.Getenv("CORE_GRPC_ACTOR_CA_KEY_PATH"), "Core gRPC actor CA key path (optional)")
+
 	log.Info().Msg("Core gRPC Address:" + conf.CoreGrpc.Address)
 	log.Info().Msg("Core gRPC Secure Options:" + strconv.Itoa(int(conf.CoreGrpc.Secure)))
 	log.Info().Msg("Core gRPC CA Cert Path:" + conf.CoreGrpc.ServerCAPath)
 	log.Info().Msg("Core gRPC client Cert Path:" + conf.CoreGrpc.ClientCertPath)
 	log.Info().Msg("Core gRPC client Key Path:" + conf.CoreGrpc.ClientKeyPath)
+	if conf.CoreGrpc.ActorCACertPath != "" {
+		log.Info().Msg("Core gRPC actor CA Cert Path:" + conf.CoreGrpc.ActorCACertPath)
+	} else {
+		log.Info().Msg("Core gRPC actor CA: not configured; calls naming an actor will be refused")
+	}
 
 	// Flow config
 	flowGrpcAddress := os.Getenv("FLOW_GRPC_ADDRESS")

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -180,6 +181,16 @@ func TestCreateRedfishActionResolvesTheBmcThenRecordsTheRequest(t *testing.T) {
 	require.NoError(t, protojson.Unmarshal(f.lastByMethod[cwssaws.Forge_RedfishCreateAction_FullMethodName].RequestJSON, &coreReq))
 	assert.Equal(t, []string{"10.0.0.5"}, coreReq.GetIps())
 	assert.Equal(t, "Bios.ChangeSettings", coreReq.GetAction())
+
+	// The request is made as the caller, not as the site: Core records this
+	// name as the requester, and the site presents a certificate bearing it.
+	actor := f.lastByMethod[cwssaws.Forge_RedfishCreateAction_FullMethodName].Actor
+	require.NotNil(t, actor, "a change request must name who asked")
+	assert.NotEmpty(t, actor.User)
+	assert.Equal(t, f.org, actor.Org)
+	assert.Equal(t, authz.ProviderAdminRole, actor.Group)
+	// Resolving the address is the site's own business.
+	assert.Nil(t, f.lastByMethod[cwssaws.Forge_FindBmcIps_FullMethodName].Actor)
 	// The parameters reach Core byte for byte, so what an approver reads is
 	// what the BMC receives.
 	assert.JSONEq(t, `{"Attributes":{"BootMode":"Uefi"}}`, coreReq.GetParameters())
@@ -234,6 +245,20 @@ func TestCreateRedfishActionConflictsWhenNoBmcIsKnown(t *testing.T) {
 	}, "")
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.NotContains(t, *f.calls, cwssaws.Forge_RedfishCreateAction_FullMethodName)
+}
+
+// Listing changes nothing about who asked or agreed, so it is the site's own
+// read and carries no actor.
+func TestListRedfishActionsIsTheSitesOwnRead(t *testing.T) {
+	f := newRedfishFixture(t, map[string]proto.Message{
+		cwssaws.Forge_FindBmcIps_FullMethodName:         bmcIPs("10.0.0.5"),
+		cwssaws.Forge_RedfishListActions_FullMethodName: &cwssaws.RedfishListActionsResponse{},
+	})
+	handler := NewListRedfishActionsHandler(f.dbSession, f.scp, common.GetTestConfig())
+
+	rec := f.request(t, handler.Handle, http.MethodGet, nil, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Nil(t, f.lastByMethod[cwssaws.Forge_RedfishListActions_FullMethodName].Actor)
 }
 
 func TestListRedfishActionsDerivesStatusAndDropsManagementAddresses(t *testing.T) {
@@ -311,6 +336,14 @@ func TestApproveAndApplyReachCoreForTheProvider(t *testing.T) {
 			require.NoError(t, protojson.Unmarshal(f.lastByMethod[tc.method].RequestJSON, &coreReq))
 			assert.Equal(t, int64(42), coreReq.GetRequestId())
 
+			// Approving and applying are recorded against the provider who did
+			// them; Core refuses the same name twice, so this is what makes the
+			// two-approval threshold mean two people.
+			actor := f.lastByMethod[tc.method].Actor
+			require.NotNil(t, actor)
+			assert.NotEmpty(t, actor.User)
+			assert.Equal(t, authz.ProviderAdminRole, actor.Group)
+
 			// Approving does not need the Machine's address, so it is not looked up.
 			assert.NotContains(t, *f.calls, cwssaws.Forge_FindBmcIps_FullMethodName)
 		})
@@ -329,6 +362,11 @@ func TestCancelRedfishActionIsAllowedForATenant(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	assert.Contains(t, *f.calls, cwssaws.Forge_RedfishCancelAction_FullMethodName)
+
+	actor := f.lastByMethod[cwssaws.Forge_RedfishCancelAction_FullMethodName].Actor
+	require.NotNil(t, actor)
+	assert.Equal(t, grant.org, actor.Org)
+	assert.Equal(t, authz.TenantAdminRole, actor.Group)
 }
 
 func TestRedfishActionRejectsAnUnparsableRequestID(t *testing.T) {
@@ -367,6 +405,15 @@ func TestUnattributableChangeIsReportedAsNotImplemented(t *testing.T) {
 		assert.Equal(t, redfishActionUnattributable, got.Message)
 		assert.NotContains(t, got.Message, "retryable")
 	}
+
+	// The site can be the party unable to name the caller too: one with no
+	// actor CA refuses in the shared words, and the caller sees the same 501.
+	siteErr := cutil.NewAPIError(http.StatusInternalServerError,
+		"activity error: "+coreproxy.ActorUnsupportedMessage+" (type: Error, retryable: true)", nil)
+	got := asUnattributable(siteErr)
+	require.NotNil(t, got)
+	assert.Equal(t, http.StatusNotImplemented, got.Code)
+	assert.Equal(t, redfishActionUnattributable, got.Message)
 }
 
 // Every other failure keeps the status Core gave it, so a genuine 404 or a
@@ -459,4 +506,25 @@ func TestCreateRedfishActionPassesOtherCoreFailuresThrough(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), redfishActionUnattributable)
+}
+
+// Core refuses a second approval from the same name, so the actor's user has to
+// be stable for one person and distinct between two. Email is what a reader of
+// the audit record recognises; the fallbacks are for principals with none.
+func TestRedfishActorPrefersEmailThenStarfleetIDThenRowID(t *testing.T) {
+	id := uuid.New()
+	email, sfid := "alice@example.com", "sf-alice"
+
+	a := redfishActor(&cdbm.User{ID: id, Email: &email, StarfleetID: &sfid}, "acme", true)
+	assert.Equal(t, "alice@example.com", a.User)
+	assert.Equal(t, "acme", a.Org)
+	assert.Equal(t, authz.ProviderAdminRole, a.Group)
+
+	a = redfishActor(&cdbm.User{ID: id, StarfleetID: &sfid}, "acme", false)
+	assert.Equal(t, "sf-alice", a.User)
+	assert.Equal(t, authz.TenantAdminRole, a.Group)
+
+	empty := ""
+	a = redfishActor(&cdbm.User{ID: id, Email: &empty, StarfleetID: &empty}, "acme", false)
+	assert.Equal(t, id.String(), a.User, "an empty string is not a name; fall through to the row ID")
 }

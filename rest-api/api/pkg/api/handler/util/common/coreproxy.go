@@ -34,6 +34,17 @@ import (
 // the status code and message without replacing Core/Temporal details with a
 // generic wrapper.
 func ExecuteCoreGRPC(ctx context.Context, stc tclient.Client, fullMethod string, req proto.Message, resp proto.Message, secretKey string, secretFields ...string) *cutil.APIError {
+	return ExecuteCoreGRPCAs(ctx, stc, nil, fullMethod, req, resp, secretKey, secretFields...)
+}
+
+// ExecuteCoreGRPCAs is ExecuteCoreGRPC made on behalf of a named person.
+//
+// Core records the requester, approver and applier of a Redfish action from
+// the client certificate presented to it, and refuses a caller it cannot name.
+// The site proxies as itself, so for those methods the handler passes the
+// authenticated user as actor and the site mints a certificate naming them for
+// that one call. A nil actor is the ordinary case: the call is the site's own.
+func ExecuteCoreGRPCAs(ctx context.Context, stc tclient.Client, actor *coreproxy.Actor, fullMethod string, req proto.Message, resp proto.Message, secretKey string, secretFields ...string) *cutil.APIError {
 	reqJSON, err := protojson.Marshal(req)
 	if err != nil {
 		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to encode Core proxy request", fmt.Errorf("encode request for %s: %w", fullMethod, err))
@@ -69,6 +80,7 @@ func ExecuteCoreGRPC(ctx context.Context, stc tclient.Client, fullMethod string,
 		FullMethod:       fullMethod,
 		RequestJSON:      reqJSON,
 		EncryptedSecrets: encryptedSecrets,
+		Actor:            actor,
 	})
 	if err != nil {
 		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to execute Core proxy workflow", fmt.Errorf("execute %s workflow: %w", coreproxy.WorkflowName, err))

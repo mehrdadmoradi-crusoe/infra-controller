@@ -80,6 +80,12 @@ type CoreGrpcConfig struct {
 	ServerCAPath   string               `json:"coreGrpcCertPath"`
 	ClientCertPath string               `json:"coreGrpcClientCertPath"`
 	ClientKeyPath  string               `json:"coreGrpcClientKeyPath"`
+	// ActorCACertPath and ActorCAKeyPath hold the intermediate CA this site
+	// mints per-actor client certificates from, for the Core methods that
+	// record who asked. Both empty means the site cannot attribute calls, and
+	// a request naming an actor is refused rather than sent as the site itself.
+	ActorCACertPath string `json:"coreGrpcActorCACertPath"`
+	ActorCAKeyPath  string `json:"coreGrpcActorCAKeyPath"`
 }
 
 // FlowGrpcConfig holds configurations for connecting to Flow gRPC server

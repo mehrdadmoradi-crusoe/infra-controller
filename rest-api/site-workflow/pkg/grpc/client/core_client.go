@@ -172,6 +172,18 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 		return nil, ErrCoreGrpcClientInvalidSecureOpts
 	}
 
+	if err := client.dialAndVerify(config); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// dialAndVerify finishes construction once the transport credentials are on
+// dialOpts: interceptors, the connection, the service client, and a Version
+// probe so a client that cannot reach Core is never handed back as connected.
+// Shared by NewCoreGrpcClient and NewCoreGrpcClientWithCertificate so the two
+// differ only in whose certificate they present.
+func (client *CoreGrpcClient) dialAndVerify(config *CoreGrpcClientConfig) error {
 	// configure interceptors
 	var unaryInterceptors []grpc.UnaryClientInterceptor
 	if config.ClientMetrics != nil {
@@ -193,10 +205,11 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 	}
 
 	// Create the client connection
+	var err error
 	client.conn, err = grpc.NewClient(config.Address, client.dialOpts...)
 	if err != nil {
 		log.Error().Err(err).Msg("CoreGrpcClient: Failed to initialize gRPC client")
-		return nil, err
+		return err
 	}
 	log.Info().Msg("CoreGrpcClient: gRPC client initialized")
 
@@ -207,14 +220,50 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 	// Check the version of the server
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Duration(defaultCoreGrpcDialTimeoutSeconds)*time.Second))
 	defer cancel()
-	_, err = client.grpcServiceClient.Version(ctx, &wflows.VersionRequest{})
-	if err != nil {
+	if _, err = client.grpcServiceClient.Version(ctx, &wflows.VersionRequest{}); err != nil {
 		log.Error().Err(err).Msg("CoreGrpcClient: Failed to get version from server")
-		return nil, fmt.Errorf("CoreGrpcClient: Failed to get version from server: %w", err)
+		return fmt.Errorf("CoreGrpcClient: Failed to get version from server: %w", err)
 	}
 
 	log.Info().Msg("CoreGrpcClient: Successfully connected to server")
+	return nil
+}
 
+// NewCoreGrpcClientWithCertificate dials Core presenting clientCert in place of
+// the certificate files named in config. It is how a call is made as someone
+// other than the site: the actor path mints a short-lived leaf naming a user
+// and dials with it, so Core reads that user from the certificate exactly as
+// it would from the person's own. Address, server CA and metrics come from
+// config as usual. The caller owns the returned client and should Close it;
+// these connections are per call, not pooled.
+func NewCoreGrpcClientWithCertificate(config *CoreGrpcClientConfig, clientCert tls.Certificate) (*CoreGrpcClient, error) {
+	if config == nil || config.Address == "" {
+		log.Error().Err(ErrCoreGrpcClientInvalidAddress).Msg("CoreGrpcClient: No address provided")
+		return nil, ErrCoreGrpcClientInvalidAddress
+	}
+	if config.ServerCAPath == "" {
+		log.Error().Err(ErrCoreGrpcClientInvalidServerCA).Msg("CoreGrpcClient: No server CA path provided")
+		return nil, ErrCoreGrpcClientInvalidServerCA
+	}
+	cabytes, err := os.ReadFile(config.ServerCAPath)
+	if err != nil {
+		log.Error().Err(err).Msg("CoreGrpcClient: Failed to load Root CA cert")
+		return nil, err
+	}
+	capool := x509.NewCertPool()
+	if !capool.AppendCertsFromPEM(cabytes) {
+		return nil, fmt.Errorf("CoreGrpcClient: Failed to append CA cert to CA pool")
+	}
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      capool,
+	})
+
+	client := &CoreGrpcClient{}
+	client.dialOpts = append(client.dialOpts, grpc.WithTransportCredentials(creds))
+	if err := client.dialAndVerify(config); err != nil {
+		return nil, err
+	}
 	return client, nil
 }
 
