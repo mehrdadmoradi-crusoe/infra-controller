@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -387,4 +388,75 @@ func TestUnattributableLeavesOtherFailuresAlone(t *testing.T) {
 		assert.Equal(t, tc.code, got.Code, tc.msg)
 		assert.Equal(t, tc.msg, got.Message)
 	}
+}
+
+// The regression test for the defect this whole surface shipped with.
+//
+// Core refuses to record a change it cannot attribute, and every handler test
+// above passes anyway, because the shared fixture's proxy can only succeed.
+// This one injects the refusal and asserts the handler turns it into a 501
+// the caller can act on, rather than the bare 500 the shared gRPC mapping
+// produces for an Unauthenticated it has no case for.
+func TestCreateRedfishActionReportsCoreRefusal(t *testing.T) {
+	f := newRedfishFixture(t, nil)
+
+	// Core's own wording, from CarbideError::ClientCertificateMissingInformation.
+	coreRefusal := errors.New(
+		"Client certificate presented has missing information: external user info. " +
+			"(type: Error, retryable: true)")
+
+	tsc, calls := newCoreProxyMock(t,
+		map[string]proto.Message{
+			cwssaws.Forge_FindBmcIps_FullMethodName: bmcIPs("10.0.0.5"),
+		},
+		map[string]error{
+			cwssaws.Forge_RedfishCreateAction_FullMethodName: coreRefusal,
+		})
+	f.scp.IDClientMap[f.siteID] = tsc
+
+	handler := NewCreateRedfishActionHandler(f.dbSession, f.scp, common.GetTestConfig())
+	rec := f.request(t, handler.Handle, http.MethodPost, map[string]any{
+		"action":     "Bios.ChangeSettings",
+		"target":     "/redfish/v1/Systems/1/Bios/Settings",
+		"parameters": `{"Attributes":{"BootMode":"Uefi"}}`,
+	}, "")
+
+	require.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), redfishActionUnattributable)
+	// Core's raw wording is not passed on: it names a retryable error and a
+	// certificate the caller never presented and could not supply.
+	assert.NotContains(t, rec.Body.String(), "retryable")
+	assert.NotContains(t, rec.Body.String(), "Client certificate presented")
+
+	// The address was still resolved first, so the failure is the Core
+	// refusing the change, not this API failing to reach it.
+	assert.Equal(t, []string{
+		cwssaws.Forge_FindBmcIps_FullMethodName,
+		cwssaws.Forge_RedfishCreateAction_FullMethodName,
+	}, coreMethodsCalled(calls))
+}
+
+// A Core failure that is not the attribution refusal keeps its own status, so
+// the 501 above cannot swallow a genuine fault.
+func TestCreateRedfishActionPassesOtherCoreFailuresThrough(t *testing.T) {
+	f := newRedfishFixture(t, nil)
+
+	tsc, _ := newCoreProxyMock(t,
+		map[string]proto.Message{
+			cwssaws.Forge_FindBmcIps_FullMethodName: bmcIPs("10.0.0.5"),
+		},
+		map[string]error{
+			cwssaws.Forge_RedfishCreateAction_FullMethodName: errors.New("database is unavailable"),
+		})
+	f.scp.IDClientMap[f.siteID] = tsc
+
+	handler := NewCreateRedfishActionHandler(f.dbSession, f.scp, common.GetTestConfig())
+	rec := f.request(t, handler.Handle, http.MethodPost, map[string]any{
+		"action":     "Bios.ChangeSettings",
+		"target":     "/redfish/v1/Systems/1/Bios/Settings",
+		"parameters": "{}",
+	}, "")
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), redfishActionUnattributable)
 }

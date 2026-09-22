@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,9 @@ type eventLogFixture struct {
 	user      *cdbm.User
 	dbSession *cdb.Session
 	scp       *sc.ClientPool
+	// siteID lets a test swap the Site's proxy client, so a Core failure can
+	// be injected -- see newCoreProxyMock.
+	siteID string
 	// browsed is every Redfish URI requested, in order.
 	browsed *[]string
 }
@@ -108,6 +112,7 @@ func newEventLogFixture(t *testing.T, bodies map[string]string) eventLogFixture 
 		user:      user,
 		dbSession: dbSession,
 		scp:       scp,
+		siteID:    site.ID.String(),
 		browsed:   browsed,
 	}
 }
@@ -267,4 +272,34 @@ func TestMachineEventLogReturnsEmptyWhenNoServicesExist(t *testing.T) {
 	assert.Empty(t, log.Entries)
 	assert.Empty(t, log.Services)
 	assert.False(t, log.Truncated)
+}
+
+// Reading a controller's log takes several Core calls: the BMC address, then
+// a walk down the Redfish tree. A failure at the first step is not the same as
+// a failure partway through the walk, and neither should be reported as an
+// empty log -- a caller reading "no entries" must not be looking at a read
+// that never happened.
+func TestMachineEventLogReportsACoreFailureRatherThanAnEmptyLog(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+	}{
+		{"the BMC address cannot be resolved", cwssaws.Forge_FindBmcIps_FullMethodName},
+		{"the controller cannot be read", cwssaws.Forge_RedfishBrowse_FullMethodName},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEventLogFixture(t, nil)
+			tsc, _ := newCoreProxyMock(t,
+				map[string]proto.Message{
+					cwssaws.Forge_FindBmcIps_FullMethodName: bmcIPs("10.0.0.5"),
+				},
+				map[string]error{tc.method: errors.New("core is unavailable")})
+			f.scp.IDClientMap[f.siteID] = tsc
+
+			rec := f.get(t, nil)
+
+			assert.GreaterOrEqual(t, rec.Code, 400,
+				"a read that did not happen must not be reported as a successful empty log: %s", rec.Body.String())
+		})
+	}
 }
