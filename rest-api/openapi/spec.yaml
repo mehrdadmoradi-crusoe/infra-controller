@@ -9348,7 +9348,7 @@ paths:
       description: |-
         Request a change to the Machine's BIOS or BMC through the audited proxy.
 
-        Nothing is applied by this call. The change is recorded with its requester and waits for approval; Providers then approve it and apply it. More than one approval is required, so `approvalsRequired` on the action says how many, and an apply below that is refused. The caller never holds a BMC credential, and never names a management address: the Machine's management controller is resolved from the Machine itself.
+        Nothing is applied by this call. The change is recorded with its requester and waits for approval; a Provider then approves it and applies it. The request itself counts as the requester's approval, so `approvalsRequired` (2) means the requester and one other person: `approvalsHeld` is 1 on a fresh request, and an apply below the threshold is refused. The caller never holds a BMC credential, and never names a management address: the Machine's management controller is resolved from the Machine itself.
 
         `parameters` is passed to the controller exactly as submitted, so that what an approver reads is what the controller receives.
 
@@ -9495,6 +9495,8 @@ paths:
         Carry out a change that has been approved. Requires a `PROVIDER_ADMIN` role.
 
         An apply below the required number of approvals is refused with `400`, and an apply that cannot be attributed to a named applier is refused with `501`.
+
+        A `202` means the Core accepted the apply and is sending the change to the Machine's management controller; it is not the controller's answer. Read the action afterwards: `status` becomes `Applied` and `outcomes` carries what each controller said, so a change the controller refused is visible as Applied with a failed outcome rather than as success.
       responses:
         '202':
           description: The change was accepted for application
@@ -14993,13 +14995,63 @@ components:
             - Applied
           description: >-
             Pending with no approvals, AwaitingApproval while short of the threshold, Approved
-            once it is met, Applied once carried out.
+            once it is met, Applied once the Core has sent the change to the Machine's management
+            controller. Applied is the Core's decision, not the controller's answer; that is in
+            `outcomes`.
+        outcomes:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineRedfishActionOutcome'
+          description: >-
+            What each management controller the change was sent to said in reply, without saying
+            which controller is which. Empty until the change is applied.
+        outcomesPending:
+          type: integer
+          description: How many controllers have not answered yet.
+        outcomesFailed:
+          type: integer
+          description: >-
+            How many controllers answered with anything other than success. A change the Core
+            dispatched and the controller refused is Applied with one failed outcome, and must not
+            read as accepted.
       required:
         - requestId
         - requester
         - action
         - target
         - status
+        - outcomes
+        - outcomesPending
+        - outcomesFailed
+    MachineRedfishActionOutcome:
+      title: MachineRedfishActionOutcome
+      type: object
+      description: One management controller's reply to an applied change. Response headers are not included.
+      properties:
+        status:
+          type: string
+          description: >-
+            The controller's HTTP status line, for example "405 Method Not Allowed", or the Core's
+            own "not executed" when it declined to send the change because the Machine's board
+            serial no longer matched the one recorded at request time.
+        completedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        detail:
+          type:
+            - string
+            - 'null'
+          description: >-
+            The start of the controller's response body, which for a refusal is usually a Redfish
+            error with the reason. Cut at 1024 characters.
+        succeeded:
+          type: boolean
+          description: Whether status is a 2xx.
+      required:
+        - status
+        - succeeded
     MachineRepairRequest:
       type: object
       title: MachineRepairRequest

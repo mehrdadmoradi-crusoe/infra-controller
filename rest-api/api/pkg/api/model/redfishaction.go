@@ -89,10 +89,46 @@ type APIRedfishAction struct {
 	ApprovalsHeld     int `json:"approvalsHeld"`
 	ApprovalsRequired int `json:"approvalsRequired"`
 	// Status is derived: Pending with no approvals, AwaitingApproval while
-	// short of the threshold, Approved once it is met, Applied once carried
-	// out.
+	// short of the threshold, Approved once it is met, Applied once the Core
+	// has sent it to the Machine's management controller. Applied is the
+	// Core's decision, not the controller's answer; that is in Outcomes.
 	Status string `json:"status"`
+	// Outcomes is what each management controller the change was sent to
+	// said in reply, in the order the Core holds them, without saying which
+	// controller is which: the management network is not addressable here.
+	// Empty until the change is applied.
+	Outcomes []APIRedfishActionOutcome `json:"outcomes"`
+	// OutcomesPending is how many controllers have not answered yet, and
+	// OutcomesFailed how many answered with anything other than success. They
+	// exist so that "Applied" cannot be read as "the controller accepted it":
+	// a change the Core dispatched and the controller refused is Applied with
+	// one failed outcome, and the two must not look the same.
+	OutcomesPending int `json:"outcomesPending"`
+	OutcomesFailed  int `json:"outcomesFailed"`
 }
+
+// APIRedfishActionOutcome is one management controller's reply to an applied
+// change. Response headers are dropped: they carry the controller's server
+// banner and session material and nothing a caller needs.
+type APIRedfishActionOutcome struct {
+	// Status is the controller's HTTP status line, for example
+	// "405 Method Not Allowed", or the Core's own "not executed" when it
+	// declined to send the change because the Machine's board serial no longer
+	// matched the one recorded when the change was requested.
+	Status string `json:"status"`
+	// CompletedAt is when the reply was recorded.
+	CompletedAt *string `json:"completedAt"`
+	// Detail is the start of the controller's response body, which for a
+	// refusal is usually a Redfish error with the reason. Cut at
+	// RedfishOutcomeDetailLimit so a controller cannot make this record large.
+	Detail *string `json:"detail"`
+	// Succeeded is whether Status is a 2xx, so a caller need not parse it.
+	Succeeded bool `json:"succeeded"`
+}
+
+// RedfishOutcomeDetailLimit is the most of a controller's response body
+// carried in an outcome.
+const RedfishOutcomeDetailLimit = 1024
 
 // Redfish action statuses.
 const (
@@ -103,11 +139,14 @@ const (
 )
 
 // RedfishActionRequiredApprovals is how many approvals the Core requires
-// before an action may be applied. It mirrors NUM_REQUIRED_APPROVALS in
-// crates/api-core/src/handlers/redfish.rs, which rejects an apply with
-// "insufficient approvals" below it. Reporting Approved after a single
-// approval would tell a caller the change is ready when applying it would
-// still fail, so the threshold is named here rather than assumed to be one.
+// before a change may be applied. It mirrors NUM_REQUIRED_APPROVALS in the
+// Core (crates/api-core/src/handlers/redfish.rs).
+//
+// The Core counts the request itself as the requester's approval: it inserts
+// the requester as the first entry in approvers. So 2 means the requester and
+// one other person -- which is what four-eyes means -- not two approvals on
+// top of the request. ApprovalsHeld therefore includes the requester, and a
+// freshly requested change already holds 1.
 const RedfishActionRequiredApprovals = 2
 
 // APIRedfishActionCreated is the response to a create.
@@ -158,7 +197,44 @@ func NewAPIRedfishAction(action *cwssaws.RedfishAction) APIRedfishAction {
 		out.Applier = &who
 	}
 
+	out.Outcomes = make([]APIRedfishActionOutcome, 0, len(action.GetResults()))
+	for _, wrapped := range action.GetResults() {
+		result := wrapped.GetResult()
+		if result == nil {
+			// The Core has a slot for this controller but no reply yet.
+			out.OutcomesPending++
+			continue
+		}
+		outcome := APIRedfishActionOutcome{
+			Status:    result.GetStatus(),
+			Succeeded: redfishStatusSucceeded(result.GetStatus()),
+		}
+		if at := result.GetCompletedAt(); at != nil {
+			when := at.AsTime().Format(time.RFC3339)
+			outcome.CompletedAt = &when
+		}
+		if body := result.GetBody(); body != "" {
+			detail := body
+			if len(detail) > RedfishOutcomeDetailLimit {
+				detail = detail[:RedfishOutcomeDetailLimit] + "\u2026"
+			}
+			outcome.Detail = &detail
+		}
+		if !outcome.Succeeded {
+			out.OutcomesFailed++
+		}
+		out.Outcomes = append(out.Outcomes, outcome)
+	}
+
 	return out
+}
+
+// redfishStatusSucceeded reads the Core's status string for one controller
+// reply. The Core records an HTTP status line ("200 OK", "405 Method Not
+// Allowed") or its own "not executed"; only a 2xx is success, and anything
+// unparseable is not assumed to be.
+func redfishStatusSucceeded(status string) bool {
+	return len(status) >= 3 && status[0] == '2' && status[1] >= '0' && status[1] <= '9' && status[2] >= '0' && status[2] <= '9'
 }
 
 // NewAPIRedfishActions converts a Core action list, preserving its order.
