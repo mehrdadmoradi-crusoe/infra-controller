@@ -2670,3 +2670,44 @@ func TestMachine_StatusForAssignment(t *testing.T) {
 		})
 	}
 }
+
+// The health report is stored as JSONB, so its keys are the `json` tag names.
+// Before GetHealth decoded with TagName "json", mapstructure matched on field
+// names and silently dropped every snake_case key, so a caller saw a nil
+// InAlertSince on an alert the source had timestamped. This asserts the
+// multi-word fields survive the decode.
+func TestMachine_GetHealthDecodesSnakeCaseKeys(t *testing.T) {
+	m := &Machine{
+		Health: map[string]interface{}{
+			"source":      "machine-validation",
+			"observed_at": "2026-09-18T11:04:00Z",
+			"alerts": []map[string]interface{}{{
+				"id":             "MemoryLatency",
+				"target":         "socket1",
+				"in_alert_since": "2026-09-18T10:00:00Z",
+				"message":        "latency above threshold on socket 1",
+				"tenant_message": "a memory fault is being investigated",
+			}},
+		},
+	}
+
+	health, err := m.GetHealth()
+	assert.NoError(t, err)
+	assert.NotNil(t, health)
+
+	assert.Equal(t, "machine-validation", health.Source)
+	if assert.NotNil(t, health.ObservedAt) {
+		assert.Equal(t, "2026-09-18T11:04:00Z", *health.ObservedAt)
+	}
+
+	if assert.Len(t, health.Alerts, 1) {
+		alert := health.Alerts[0]
+		assert.Equal(t, "MemoryLatency", alert.Id)
+		if assert.NotNil(t, alert.InAlertSince) {
+			assert.Equal(t, "2026-09-18T10:00:00Z", *alert.InAlertSince)
+		}
+		if assert.NotNil(t, alert.TenantMessage) {
+			assert.Equal(t, "a memory fault is being investigated", *alert.TenantMessage)
+		}
+	}
+}
